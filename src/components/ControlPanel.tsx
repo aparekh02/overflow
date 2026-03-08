@@ -6,7 +6,8 @@
 import { useStore } from "../store";
 import type { ColormapMode, BoxDisplayMode } from "../store";
 import { colors, fonts } from "../theme";
-import { BOX_TYPE_COLORS } from "../mockData";
+import { BOX_TYPE_COLORS, ALL_SCENARIOS, SCENARIO_INFO } from "../mockData";
+import type { MockScenario } from "../mockData";
 
 export default function ControlPanel() {
   const colormapMode = useStore((s) => s.colormapMode);
@@ -18,7 +19,12 @@ export default function ControlPanel() {
   const showGrid = useStore((s) => s.showGrid);
   const toggleGrid = useStore((s) => s.actions.toggleGrid);
   const currentFrame = useStore((s) => s.currentFrame);
+  const dataSource = useStore((s) => s.dataSource);
+  const mockScenario = useStore((s) => s.mockScenario);
+  const setMockScenario = useStore((s) => s.actions.setMockScenario);
+  const actions = useStore((s) => s.actions);
 
+  const isMock = dataSource === "mock";
   const pts = currentFrame?.pointCount ?? 0;
   const boxCount = currentFrame?.boxes?.length ?? 0;
 
@@ -104,6 +110,62 @@ export default function ControlPanel() {
       {/* ── Display ── */}
       <Label text="Display" />
       <Toggle label="Grid" active={showGrid} onToggle={toggleGrid} />
+
+      {/* ── Scenario (mock only) ── */}
+      {isMock && (
+        <>
+          <Sep />
+          <Label text="Scenario" />
+          <div style={{ padding: "2px 8px", display: "flex", flexDirection: "column", gap: 2 }}>
+            {ALL_SCENARIOS.map((sc) => {
+              const info = SCENARIO_INFO[sc];
+              const active = mockScenario === sc;
+              const sevColor = info.severity === "critical" ? "#FF4444"
+                : info.severity === "warning" ? "#FFB020" : colors.accent;
+              return (
+                <button
+                  key={sc}
+                  onClick={() => {
+                    setMockScenario(sc);
+                    // Clear custom AI scenario and reload
+                    actions.setCustomIncident(null);
+                    actions.reset();
+                    actions.setDataSource("mock");
+                  }}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6,
+                    padding: "4px 6px", borderRadius: 4, cursor: "pointer",
+                    border: "none",
+                    background: active ? "rgba(255,255,255,0.06)" : "transparent",
+                    transition: "all 0.12s",
+                  }}
+                >
+                  <span style={{
+                    width: 5, height: 5, borderRadius: "50%", flexShrink: 0,
+                    background: active ? sevColor : colors.textDim,
+                    boxShadow: active ? `0 0 6px ${sevColor}` : "none",
+                  }} />
+                  <span style={{
+                    fontSize: 9, fontFamily: fonts.sans, fontWeight: active ? 600 : 400,
+                    color: active ? colors.textPrimary : colors.textDim,
+                  }}>
+                    {info.label}
+                  </span>
+                  {active && info.severity !== "none" && (
+                    <span style={{
+                      fontSize: 7, fontFamily: fonts.mono, fontWeight: 700,
+                      color: sevColor, marginLeft: "auto",
+                      textTransform: "uppercase", letterSpacing: "0.5px",
+                    }}>
+                      {info.severity}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       <Sep />
 

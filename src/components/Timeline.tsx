@@ -1,11 +1,14 @@
 /**
  * Timeline — Floating glass bottom bar.
- * Play/pause, step, scrub, speed. Positioned absolute over the 3D canvas.
+ * Play/pause, step, scrub, speed.
+ * Shows incident zones on the scrub bar when a mock scenario has one.
  */
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import { colors, fonts } from "../theme";
 import { useStore } from "../store";
+import { SCENARIO_INFO } from "../mockData";
+import type { IncidentWindow } from "../mockData";
 
 export default function Timeline() {
   const currentFrameIndex = useStore((s) => s.currentFrameIndex);
@@ -18,6 +21,29 @@ export default function Timeline() {
   const togglePlay = useStore((s) => s.actions.togglePlay);
   const setPlaybackSpeed = useStore((s) => s.actions.setPlaybackSpeed);
   const fps = useStore((s) => s.sceneData?.fps ?? 10);
+  const dataSource = useStore((s) => s.dataSource);
+  const mockScenario = useStore((s) => s.mockScenario);
+  const totalSeconds = (totalFrames - 1) / fps;
+
+  const customIncident = useStore((s) => s.customIncident);
+  const customSeverity = useStore((s) => s.customSeverity);
+  const customScenarioName = useStore((s) => s.customScenarioName);
+
+  // Get incident window if mock scenario
+  const isMock = dataSource === "mock";
+  const scenarioMeta = isMock ? SCENARIO_INFO[mockScenario] : null;
+  const incident: IncidentWindow | null = (isMock ? (customIncident ?? scenarioMeta?.incident) : null) ?? null;
+  const effectiveSeverity = customSeverity ?? scenarioMeta?.severity ?? "none";
+  const effectiveLabel = customScenarioName ?? scenarioMeta?.label ?? "";
+
+  // Current time
+  const currentTime = currentFrameIndex / fps;
+  const isInIncident = incident
+    ? currentTime >= incident.startTime && currentTime <= incident.endTime
+    : false;
+  const isAtPeak = incident
+    ? Math.abs(currentTime - incident.peakTime) < 0.3
+    : false;
 
   // Playback loop
   const rafRef = useRef(0);
@@ -65,8 +91,14 @@ export default function Timeline() {
   }, [scrubTo]);
 
   const progress = totalFrames > 1 ? currentFrameIndex / (totalFrames - 1) : 0;
-  const time = (currentFrameIndex / fps).toFixed(1);
-  const totalTime = ((totalFrames - 1) / fps).toFixed(1);
+  const time = currentTime.toFixed(1);
+  const totalTimeStr = totalSeconds.toFixed(1);
+
+  // Incident zone positions as percentage of timeline
+  const incidentStartPct = incident && totalSeconds > 0 ? (incident.startTime / totalSeconds) * 100 : 0;
+  const incidentEndPct = incident && totalSeconds > 0 ? (incident.endTime / totalSeconds) * 100 : 0;
+  const incidentPeakPct = incident && totalSeconds > 0 ? (incident.peakTime / totalSeconds) * 100 : 0;
+  const sevColor = effectiveSeverity === "critical" ? "#FF4444" : "#FFB020";
 
   return (
     <div style={{
@@ -75,13 +107,18 @@ export default function Timeline() {
       height: 48,
       display: "flex", alignItems: "center",
       padding: "0 14px", gap: 10,
-      background: "rgba(12,15,26,0.75)",
+      background: isInIncident
+        ? `rgba(${effectiveSeverity === "critical" ? "60,15,15" : "50,35,10"},0.85)`
+        : "rgba(12,15,26,0.75)",
       backdropFilter: "blur(20px)",
-      border: "1px solid rgba(255,255,255,0.06)",
+      border: isInIncident
+        ? `1px solid ${sevColor}40`
+        : "1px solid rgba(255,255,255,0.06)",
       borderRadius: 12,
       fontFamily: fonts.sans,
       userSelect: "none",
       zIndex: 10,
+      transition: "background 0.3s, border 0.3s",
     }}>
       {/* Step back */}
       <Btn onClick={prevFrame} title="← Previous">
@@ -114,9 +151,12 @@ export default function Timeline() {
       {/* Time */}
       <span style={{
         fontSize: 10, fontFamily: fonts.mono,
-        color: colors.textSecondary, minWidth: 64, textAlign: "center",
+        color: isInIncident ? sevColor : colors.textSecondary,
+        minWidth: 64, textAlign: "center",
+        fontWeight: isInIncident ? 700 : 400,
+        transition: "color 0.2s",
       }}>
-        {time}s / {totalTime}s
+        {time}s / {totalTimeStr}s
       </span>
 
       {/* Scrub bar */}
@@ -124,30 +164,104 @@ export default function Timeline() {
         ref={barRef}
         onMouseDown={(e) => { draggingRef.current = true; scrubTo(e.clientX); }}
         style={{
-          flex: 1, height: 20,
+          flex: 1, height: 24,
           display: "flex", alignItems: "center",
           cursor: "pointer", position: "relative",
         }}
       >
-        {/* Track */}
+        {/* Track background */}
         <div style={{
           position: "absolute", left: 0, right: 0, height: 3,
           background: "rgba(255,255,255,0.06)", borderRadius: 2,
         }} />
-        {/* Fill */}
+
+        {/* ── Incident zone highlight ── */}
+        {incident && (
+          <>
+            {/* Incident range bar */}
+            <div style={{
+              position: "absolute",
+              left: `${incidentStartPct}%`,
+              width: `${incidentEndPct - incidentStartPct}%`,
+              height: 14,
+              top: "50%",
+              transform: "translateY(-50%)",
+              background: `${sevColor}20`,
+              border: `1px solid ${sevColor}40`,
+              borderRadius: 3,
+              pointerEvents: "none",
+            }} />
+            {/* Incident start marker */}
+            <div style={{
+              position: "absolute",
+              left: `${incidentStartPct}%`,
+              width: 2, height: 18,
+              top: "50%", transform: "translateY(-50%)",
+              background: `${sevColor}80`,
+              borderRadius: 1,
+              pointerEvents: "none",
+            }} />
+            {/* Incident end marker */}
+            <div style={{
+              position: "absolute",
+              left: `${incidentEndPct}%`,
+              width: 2, height: 18,
+              top: "50%", transform: "translateY(-50%)",
+              background: `${sevColor}80`,
+              borderRadius: 1,
+              pointerEvents: "none",
+            }} />
+            {/* Peak marker (triangle) */}
+            <div style={{
+              position: "absolute",
+              left: `calc(${incidentPeakPct}% - 5px)`,
+              top: -6,
+              width: 0, height: 0,
+              borderLeft: "5px solid transparent",
+              borderRight: "5px solid transparent",
+              borderTop: `6px solid ${sevColor}`,
+              pointerEvents: "none",
+            }} />
+            {/* Label above incident zone */}
+            <div style={{
+              position: "absolute",
+              left: `${(incidentStartPct + incidentEndPct) / 2}%`,
+              transform: "translateX(-50%)",
+              top: -18,
+              fontSize: 8,
+              fontFamily: fonts.mono,
+              fontWeight: 700,
+              color: sevColor,
+              letterSpacing: "0.5px",
+              textTransform: "uppercase",
+              whiteSpace: "nowrap",
+              pointerEvents: "none",
+            }}>
+              ⚠ {effectiveLabel}
+            </div>
+          </>
+        )}
+
+        {/* Progress fill */}
         <div style={{
           position: "absolute", left: 0, height: 3,
           width: `${progress * 100}%`,
-          background: `linear-gradient(90deg, ${colors.accent}, ${colors.accentBlue})`,
-          borderRadius: 2, transition: draggingRef.current ? "none" : "width 0.06s linear",
+          background: isInIncident
+            ? `linear-gradient(90deg, ${colors.accent}, ${sevColor})`
+            : `linear-gradient(90deg, ${colors.accent}, ${colors.accentBlue})`,
+          borderRadius: 2,
+          transition: draggingRef.current ? "none" : "width 0.06s linear",
         }} />
-        {/* Handle */}
+
+        {/* Playhead handle */}
         <div style={{
           position: "absolute",
           left: `calc(${progress * 100}% - 6px)`,
           width: 12, height: 12, borderRadius: "50%",
-          background: colors.accent,
-          boxShadow: `0 0 8px ${colors.accentDim}`,
+          background: isInIncident ? sevColor : colors.accent,
+          boxShadow: isInIncident
+            ? `0 0 12px ${sevColor}, 0 0 24px ${sevColor}60`
+            : `0 0 8px ${colors.accentDim}`,
           transition: draggingRef.current ? "none" : "left 0.06s linear",
         }} />
       </div>

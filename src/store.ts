@@ -3,7 +3,7 @@
  */
 
 import { create } from "zustand";
-import type { FrameData, SceneData } from "./mockData";
+import type { FrameData, SceneData, MockScenario, IncidentWindow } from "./mockData";
 
 export type ColormapMode = "intensity" | "range" | "elongation";
 export type BoxDisplayMode = "off" | "box" | "model";
@@ -14,6 +14,8 @@ interface StoreState {
   // Data
   sceneData: SceneData | null;
   dataSource: DataSource;
+  mockScenario: MockScenario;
+  waymoSegment: string | null; // active segment name
   loadStatus: LoadStatus;
   loadMessage: string;
   loadProgress: number;
@@ -29,6 +31,11 @@ interface StoreState {
   boxMode: BoxDisplayMode;
   pointOpacity: number;
   showGrid: boolean;
+
+  // Custom AI scenario overrides
+  customIncident: IncidentWindow | null;
+  customScenarioName: string | null;
+  customSeverity: "none" | "warning" | "critical" | null;
 
   // Computed
   currentFrame: FrameData | null;
@@ -48,10 +55,13 @@ interface StoreState {
     setPointOpacity: (v: number) => void;
     toggleGrid: () => void;
     setDataSource: (source: DataSource) => void;
+    setMockScenario: (scenario: MockScenario) => void;
+    setWaymoSegment: (seg: string | null) => void;
     setLoadStatus: (status: LoadStatus) => void;
     setLoadMessage: (msg: string) => void;
     setLoadProgress: (p: number) => void;
     setLoadError: (err: string | null) => void;
+    setCustomIncident: (incident: IncidentWindow | null, name?: string, severity?: "none" | "warning" | "critical") => void;
     reset: () => void;
   };
 }
@@ -59,6 +69,11 @@ interface StoreState {
 export const useStore = create<StoreState>((set, get) => ({
   sceneData: null,
   dataSource: "waymo",
+  mockScenario: "normal",
+  waymoSegment: null,
+  customIncident: null,
+  customScenarioName: null,
+  customSeverity: null,
   loadStatus: "idle",
   loadMessage: "",
   loadProgress: 0,
@@ -113,10 +128,17 @@ export const useStore = create<StoreState>((set, get) => ({
     setPointOpacity: (v) => set({ pointOpacity: v }),
     toggleGrid: () => set((s) => ({ showGrid: !s.showGrid })),
     setDataSource: (source) => set({ dataSource: source }),
+    setMockScenario: (scenario) => set({ mockScenario: scenario }),
+    setWaymoSegment: (seg) => set({ waymoSegment: seg }),
     setLoadStatus: (status) => set({ loadStatus: status }),
     setLoadMessage: (msg) => set({ loadMessage: msg }),
     setLoadProgress: (p) => set({ loadProgress: p }),
     setLoadError: (err) => set({ loadError: err }),
+    setCustomIncident: (incident, name, severity) => set({
+      customIncident: incident,
+      customScenarioName: name ?? null,
+      customSeverity: severity ?? null,
+    }),
     reset: () =>
       set({
         sceneData: null,
@@ -128,6 +150,9 @@ export const useStore = create<StoreState>((set, get) => ({
         loadMessage: "",
         loadProgress: 0,
         loadError: null,
+        customIncident: null,
+        customScenarioName: null,
+        customSeverity: null,
       }),
   },
 }));

@@ -1,23 +1,30 @@
 /**
- * Mock data generator — creates realistic self-driving perception data mimicking
- * Waymo Open Dataset style:
- *   • LiDAR point cloud with radial scan-line ring pattern (64-beam spinner)
- *   • 3D bounding boxes for vehicles, pedestrians, cyclists, signs
- *   • Per-frame poses (timeline animation at 10 Hz)
+ * Mock data generator — realistic self-driving perception data:
+ *   • Proper 2-lane road with ego driving straight
+ *   • Other vehicles in lanes, oncoming traffic, parked cars
+ *   • Pedestrians on sidewalks, cyclists in bike lane
+ *   • LiDAR 64-beam scanner with ray-traced ground + objects
+ *   • Incident scenarios: near-miss, rear-end collision, jaywalker, red-light runner
  */
-
-import * as THREE from "three";
 
 // ── Types ──────────────────────────────────────────────────────────
 
 export type ActorType = "vehicle" | "pedestrian" | "cyclist" | "sign";
 
+export type MockScenario =
+  | "normal"
+  | "near_miss"
+  | "rear_end"
+  | "jaywalker"
+  | "red_light_runner"
+  | "swerving_vehicle";
+
 export interface BBox3D {
   id: string;
   type: ActorType;
-  cx: number; cy: number; cz: number;       // centre
-  sx: number; sy: number; sz: number;       // size (length, width, height)
-  heading: number;                          // yaw radians
+  cx: number; cy: number; cz: number;
+  sx: number; sy: number; sz: number;
+  heading: number;
   speed: number;
   label: string;
   trackId: number;
@@ -28,8 +35,8 @@ export interface FrameData {
   egoPosition: [number, number, number];
   egoYaw: number;
   boxes: BBox3D[];
-  pointPositions: Float32Array;   // xyz interleaved (3 floats per pt)
-  pointAttributes: Float32Array;  // intensity, range, elongation (3 floats per pt)
+  pointPositions: Float32Array;
+  pointAttributes: Float32Array;
   pointCount: number;
 }
 
@@ -45,128 +52,106 @@ export interface SceneData {
 const NUM_FRAMES = 198;
 const FPS = 10;
 
-const LIDAR_BEAMS = 64;           // vertical beams
-const LIDAR_COLUMNS = 2650;       // horizontal resolution per spin
-const MAX_RANGE = 75;             // metres
-const BEAM_V_MIN = -25;           // degrees — lowest beam
-const BEAM_V_MAX = 2;             // degrees — highest beam
+const LIDAR_BEAMS = 64;
+const LIDAR_COLUMNS = 2650;
+const MAX_RANGE = 75;
+const BEAM_V_MIN = -25;
+const BEAM_V_MAX = 2;
+
+// Road geometry (Waymo-style: X=forward, Y=left)
+const LANE_WIDTH = 3.7;           // standard US lane
+const ROAD_SHOULDER = 1.5;
+// Ego drives in right lane center: y ≈ -LANE_WIDTH/2
+const EGO_LANE_Y = -LANE_WIDTH / 2;
+// Same-direction left lane
+const LEFT_LANE_Y = LANE_WIDTH / 2;
+// Oncoming lanes (separated by ~1m median)
+const ONCOMING_RIGHT_Y = LANE_WIDTH + 1.0 + LANE_WIDTH / 2;
+const ONCOMING_LEFT_Y = LANE_WIDTH + 1.0 + LANE_WIDTH * 1.5;
+// Sidewalks / parking
+const RIGHT_SIDEWALK_Y = -(LANE_WIDTH + ROAD_SHOULDER + 1.5);
+const LEFT_SIDEWALK_Y = ONCOMING_LEFT_Y + LANE_WIDTH / 2 + ROAD_SHOULDER + 1.5;
+const PARKING_RIGHT_Y = -(LANE_WIDTH + ROAD_SHOULDER + 0.3);
+const PARKING_LEFT_Y = LEFT_SIDEWALK_Y - 2.5;
+
+// Ego speed
+const EGO_SPEED = 11.0; // m/s ≈ 25 mph city driving
 
 // ── Helpers ────────────────────────────────────────────────────────
 
 function rand(lo: number, hi: number) { return lo + Math.random() * (hi - lo); }
-
 function gaussRand() {
   let u = 0, v = 0;
   while (u === 0) u = Math.random();
   while (v === 0) v = Math.random();
   return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
+function lerp(a: number, b: number, t: number) { return a + (b - a) * Math.max(0, Math.min(1, t)); }
+function smoothstep(t: number) { return t * t * (3 - 2 * t); }
 
-// ── Realistic LiDAR generation with scan-line rings ────────────────
+// ── LiDAR ray tracer ──────────────────────────────────────────────
 
-interface SimpleOccupancy {
-  boxes: BBox3D[];
-}
+interface SimpleOccupancy { boxes: BBox3D[]; }
 
-/**
- * Trace a single LiDAR ray and return hit point, or null if no return.
- * Checks ground plane + box occupancies.
- */
 function traceRay(
-  azimuth: number,    // horizontal angle rad
-  elevation: number,  // vertical angle rad
-  occ: SimpleOccupancy,
+  azimuth: number, elevation: number, occ: SimpleOccupancy,
 ): { x: number; y: number; z: number; intensity: number; range: number; elongation: number } | null {
   const cosE = Math.cos(elevation);
   const sinE = Math.sin(elevation);
   const cosA = Math.cos(azimuth);
   const sinA = Math.sin(azimuth);
-
-  // Ray direction (Waymo: X=forward, Y=left, Z=up)
   const dx = cosE * cosA;
   const dy = cosE * sinA;
   const dz = sinE;
 
   let bestT = MAX_RANGE;
   let hitType: "ground" | "object" | "none" = "none";
-  let hitBox: BBox3D | null = null;
 
-  // Ground hit (z = 0 plane, sensor at ~2.0m height)
   const sensorZ = 2.0;
   if (dz < -0.001) {
     const tGround = -sensorZ / dz;
     const gx = dx * tGround;
     const gy = dy * tGround;
     const gr = Math.sqrt(gx * gx + gy * gy);
-    if (gr < MAX_RANGE && tGround < bestT) {
-      bestT = tGround;
-      hitType = "ground";
-    }
+    if (gr < MAX_RANGE && tGround < bestT) { bestT = tGround; hitType = "ground"; }
   }
 
-  // Box hits (simple AABB after inverse rotation)
   for (const box of occ.boxes) {
     const cosH = Math.cos(-box.heading);
     const sinH = Math.sin(-box.heading);
-    // Transform ray origin to box-local frame
-    const ox = -box.cx;
-    const oy = -box.cy;
-    const oz = sensorZ - box.cz;
+    const ox = -box.cx, oy = -box.cy, oz = sensorZ - box.cz;
     const lox = ox * cosH - oy * sinH;
     const loy = ox * sinH + oy * cosH;
     const ldx = dx * cosH - dy * sinH;
     const ldy = dx * sinH + dy * cosH;
+    const halfX = box.sx / 2, halfY = box.sy / 2, halfZ = box.sz / 2;
 
-    const halfX = box.sx / 2;
-    const halfY = box.sy / 2;
-    const halfZ = box.sz / 2;
-
-    // Slab intersection
     let tMin = -1e9, tMax = 1e9;
-    // X slab
     if (Math.abs(ldx) > 1e-8) {
-      const t1 = (-halfX - lox) / ldx;
-      const t2 = (halfX - lox) / ldx;
-      tMin = Math.max(tMin, Math.min(t1, t2));
-      tMax = Math.min(tMax, Math.max(t1, t2));
+      const t1 = (-halfX - lox) / ldx, t2 = (halfX - lox) / ldx;
+      tMin = Math.max(tMin, Math.min(t1, t2)); tMax = Math.min(tMax, Math.max(t1, t2));
     } else if (Math.abs(lox) > halfX) continue;
-    // Y slab
     if (Math.abs(ldy) > 1e-8) {
-      const t1 = (-halfY - loy) / ldy;
-      const t2 = (halfY - loy) / ldy;
-      tMin = Math.max(tMin, Math.min(t1, t2));
-      tMax = Math.min(tMax, Math.max(t1, t2));
+      const t1 = (-halfY - loy) / ldy, t2 = (halfY - loy) / ldy;
+      tMin = Math.max(tMin, Math.min(t1, t2)); tMax = Math.min(tMax, Math.max(t1, t2));
     } else if (Math.abs(loy) > halfY) continue;
-    // Z slab
     if (Math.abs(dz) > 1e-8) {
-      const t1 = (-halfZ - oz) / dz;
-      const t2 = (halfZ - oz) / dz;
-      tMin = Math.max(tMin, Math.min(t1, t2));
-      tMax = Math.min(tMax, Math.max(t1, t2));
+      const t1 = (-halfZ - oz) / dz, t2 = (halfZ - oz) / dz;
+      tMin = Math.max(tMin, Math.min(t1, t2)); tMax = Math.min(tMax, Math.max(t1, t2));
     } else if (Math.abs(oz) > halfZ) continue;
 
     if (tMin <= tMax && tMax > 0) {
       const tHit = tMin > 0 ? tMin : tMax;
-      if (tHit < bestT && tHit > 0.5) {
-        bestT = tHit;
-        hitType = "object";
-        hitBox = box;
-      }
+      if (tHit < bestT && tHit > 0.5) { bestT = tHit; hitType = "object"; }
     }
   }
 
   if (hitType === "none") return null;
 
-  const px = dx * bestT;
-  const py = dy * bestT;
-  const pz = sensorZ + dz * bestT;
-  const range = bestT;
-
-  // Intensity: ground=low, objects=high with some variation
-  let intensity: number;
-  let elongation: number;
+  const px = dx * bestT, py = dy * bestT, pz = sensorZ + dz * bestT;
+  let intensity: number, elongation: number;
   if (hitType === "ground") {
-    intensity = 0.15 + 0.25 * (1 - range / MAX_RANGE) + gaussRand() * 0.05;
+    intensity = 0.15 + 0.25 * (1 - bestT / MAX_RANGE) + gaussRand() * 0.05;
     elongation = rand(0.0, 0.1);
   } else {
     intensity = 0.5 + rand(0, 0.5);
@@ -174,220 +159,591 @@ function traceRay(
   }
   intensity = Math.max(0, Math.min(1, intensity));
 
-  // Add tiny noise to simulate real sensor
   return {
-    x: px + gaussRand() * 0.02,
-    y: py + gaussRand() * 0.02,
-    z: pz + gaussRand() * 0.01,
-    intensity,
-    range,
-    elongation: Math.max(0, Math.min(1, elongation)),
+    x: px + gaussRand() * 0.02, y: py + gaussRand() * 0.02, z: pz + gaussRand() * 0.01,
+    intensity, range: bestT, elongation: Math.max(0, Math.min(1, elongation)),
   };
 }
 
 function generateLidarFrame(boxes: BBox3D[]): {
-  positions: Float32Array;
-  attributes: Float32Array;
-  count: number;
+  positions: Float32Array; attributes: Float32Array; count: number;
 } {
   const occ: SimpleOccupancy = { boxes };
   const maxPts = LIDAR_BEAMS * LIDAR_COLUMNS;
   const positions = new Float32Array(maxPts * 3);
   const attributes = new Float32Array(maxPts * 3);
   let count = 0;
-
-  // Subsample columns for performance (every ~4th → ~42K points)
   const colStep = 4;
+
   for (let beam = 0; beam < LIDAR_BEAMS; beam++) {
     const elevDeg = BEAM_V_MIN + (BEAM_V_MAX - BEAM_V_MIN) * (beam / (LIDAR_BEAMS - 1));
     const elevRad = elevDeg * (Math.PI / 180);
-
     for (let col = 0; col < LIDAR_COLUMNS; col += colStep) {
       const azimuthRad = (col / LIDAR_COLUMNS) * Math.PI * 2 - Math.PI;
-
-      // Drop-out probability (realistic: ~5% of rays miss)
       if (Math.random() < 0.05) continue;
-
       const hit = traceRay(azimuthRad, elevRad, occ);
       if (!hit) continue;
-
       const i3 = count * 3;
-      positions[i3] = hit.x;
-      positions[i3 + 1] = hit.y;
-      positions[i3 + 2] = hit.z;
-      attributes[i3] = hit.intensity;
-      attributes[i3 + 1] = hit.range;
-      attributes[i3 + 2] = hit.elongation;
+      positions[i3] = hit.x; positions[i3 + 1] = hit.y; positions[i3 + 2] = hit.z;
+      attributes[i3] = hit.intensity; attributes[i3 + 1] = hit.range; attributes[i3 + 2] = hit.elongation;
       count++;
     }
   }
 
-  return {
-    positions: positions.subarray(0, count * 3),
-    attributes: attributes.subarray(0, count * 3),
-    count,
-  };
+  return { positions: positions.subarray(0, count * 3), attributes: attributes.subarray(0, count * 3), count };
 }
 
-// ── Actor trajectories ─────────────────────────────────────────────
+// ── Actor trajectory definitions ──────────────────────────────────
 
 interface ActorDef {
   id: string;
   type: ActorType;
-  size: [number, number, number];  // sx, sy, sz (length, width, height)
+  size: [number, number, number]; // sx, sy, sz
   label: string;
   trackId: number;
   trajectory: (t: number) => { x: number; y: number; heading: number; speed: number };
 }
 
-function makeActors(): ActorDef[] {
+// ── Scenario builders ─────────────────────────────────────────────
+
+function makeBaseTraffic(): ActorDef[] {
   const actors: ActorDef[] = [];
+  let tid = 1;
 
-  // ── Moving vehicles ──
+  // === SAME-DIRECTION VEHICLES ===
+  // Car ahead in ego lane, slightly faster
   actors.push({
-    id: "v1", type: "vehicle", size: [4.8, 2.1, 1.8], label: "Car", trackId: 1,
-    trajectory: (t) => ({ x: 12 + t * 6.5, y: -1.8, heading: 0, speed: 6.5 }),
+    id: "v_ahead1", type: "vehicle", size: [4.8, 2.1, 1.5], label: "Sedan", trackId: tid++,
+    trajectory: (t) => ({ x: 25 + t * 12.5, y: EGO_LANE_Y, heading: 0, speed: 12.5 }),
   });
+  // Car in left lane, matching speed
   actors.push({
-    id: "v2", type: "vehicle", size: [4.5, 2.0, 1.6], label: "Car", trackId: 2,
-    trajectory: (t) => ({ x: 25 + t * 5, y: -1.5, heading: 0, speed: 5 }),
+    id: "v_left1", type: "vehicle", size: [4.5, 2.0, 1.6], label: "Sedan", trackId: tid++,
+    trajectory: (t) => ({ x: 10 + t * 11.0, y: LEFT_LANE_Y, heading: 0, speed: 11.0 }),
   });
+  // SUV ahead in left lane
   actors.push({
-    id: "v3", type: "vehicle", size: [5.2, 2.2, 2.0], label: "SUV", trackId: 3,
-    trajectory: (t) => ({ x: -8 + t * 8.5, y: 2.0, heading: 0, speed: 8.5 }),
-  });
-  // Oncoming
-  actors.push({
-    id: "v4", type: "vehicle", size: [4.6, 2.0, 1.7], label: "Car", trackId: 4,
-    trajectory: (t) => ({ x: 60 - t * 9, y: 5.5, heading: Math.PI, speed: 9 }),
-  });
-  // Turning at intersection
-  actors.push({
-    id: "v5", type: "vehicle", size: [4.4, 1.9, 1.5], label: "Car", trackId: 5,
-    trajectory: (t) => {
-      const tr = 5;
-      if (t < tr) return { x: 40, y: -20 + t * 7, heading: Math.PI / 2, speed: 7 };
-      const dt = t - tr;
-      const angle = Math.PI / 2 - dt * 0.25;
-      const r = 12;
-      return {
-        x: 40 + r * (1 - Math.cos(Math.PI / 2 - angle)),
-        y: -20 + tr * 7 + r * Math.sin(Math.PI / 2 - angle),
-        heading: angle, speed: 6,
-      };
-    },
-  });
-  // Behind ego
-  actors.push({
-    id: "v9", type: "vehicle", size: [4.6, 2.0, 1.7], label: "Car", trackId: 9,
-    trajectory: (t) => ({ x: -15 + t * 7, y: -5.5, heading: 0, speed: 7 }),
-  });
-  actors.push({
-    id: "v10", type: "vehicle", size: [4.3, 1.9, 1.5], label: "Car", trackId: 10,
-    trajectory: (t) => ({ x: 50 + t * 4, y: -1.8, heading: 0, speed: 4 }),
+    id: "v_left2", type: "vehicle", size: [5.0, 2.2, 1.9], label: "SUV", trackId: tid++,
+    trajectory: (t) => ({ x: 40 + t * 10.5, y: LEFT_LANE_Y, heading: 0, speed: 10.5 }),
   });
 
-  // ── Parked vehicles ──
+  // === ONCOMING TRAFFIC ===
   actors.push({
-    id: "v6", type: "vehicle", size: [4.8, 2.1, 1.8], label: "Parked", trackId: 6,
-    trajectory: () => ({ x: 18, y: 8.5, heading: 0, speed: 0 }),
+    id: "v_onc1", type: "vehicle", size: [4.6, 2.0, 1.6], label: "Sedan", trackId: tid++,
+    trajectory: (t) => ({ x: 80 - t * 13.0, y: ONCOMING_RIGHT_Y, heading: Math.PI, speed: 13.0 }),
   });
   actors.push({
-    id: "v7", type: "vehicle", size: [4.5, 2.0, 1.6], label: "Parked", trackId: 7,
-    trajectory: () => ({ x: 30, y: 8.5, heading: 0.05, speed: 0 }),
+    id: "v_onc2", type: "vehicle", size: [4.8, 2.1, 1.7], label: "Sedan", trackId: tid++,
+    trajectory: (t) => ({ x: 120 - t * 14.0, y: ONCOMING_RIGHT_Y, heading: Math.PI, speed: 14.0 }),
   });
   actors.push({
-    id: "v8", type: "vehicle", size: [5.0, 2.2, 2.2], label: "Truck", trackId: 8,
-    trajectory: () => ({ x: 45, y: 8.5, heading: 0.0, speed: 0 }),
-  });
-  actors.push({
-    id: "v11", type: "vehicle", size: [4.6, 2.0, 1.7], label: "Parked", trackId: 11,
-    trajectory: () => ({ x: 55, y: -8.5, heading: Math.PI, speed: 0 }),
-  });
-  actors.push({
-    id: "v12", type: "vehicle", size: [4.8, 2.1, 1.8], label: "Parked", trackId: 12,
-    trajectory: () => ({ x: 65, y: -8.5, heading: Math.PI, speed: 0 }),
+    id: "v_onc3", type: "vehicle", size: [6.5, 2.5, 3.0], label: "Truck", trackId: tid++,
+    trajectory: (t) => ({ x: 160 - t * 11.5, y: ONCOMING_LEFT_Y, heading: Math.PI, speed: 11.5 }),
   });
 
-  // ── Pedestrians ──
+  // === PARKED VEHICLES (right side) ===
+  for (let i = 0; i < 6; i++) {
+    const px = 15 + i * 12 + rand(-1, 1);
+    actors.push({
+      id: `v_park_r${i}`, type: "vehicle",
+      size: [rand(4.2, 5.2), rand(1.9, 2.2), rand(1.4, 1.9)],
+      label: "Parked", trackId: tid++,
+      trajectory: () => ({ x: px, y: PARKING_RIGHT_Y, heading: rand(-0.05, 0.05), speed: 0 }),
+    });
+  }
+  // === PARKED VEHICLES (left side) ===
+  for (let i = 0; i < 4; i++) {
+    const px = 20 + i * 15 + rand(-1, 1);
+    actors.push({
+      id: `v_park_l${i}`, type: "vehicle",
+      size: [rand(4.2, 5.2), rand(1.9, 2.2), rand(1.4, 1.9)],
+      label: "Parked", trackId: tid++,
+      trajectory: () => ({ x: px, y: PARKING_LEFT_Y, heading: Math.PI + rand(-0.05, 0.05), speed: 0 }),
+    });
+  }
+
+  // === PEDESTRIANS on sidewalks ===
+  // Walking along right sidewalk
   actors.push({
-    id: "p1", type: "pedestrian", size: [0.8, 0.8, 1.8], label: "Ped", trackId: 20,
-    trajectory: (t) => {
-      const start = 2;
-      if (t < start) return { x: 20, y: -6, heading: Math.PI / 2, speed: 0 };
-      const dt = t - start;
-      return { x: 20, y: -6 + dt * 1.3, heading: Math.PI / 2, speed: 1.3 };
-    },
+    id: "p_walk1", type: "pedestrian", size: [0.6, 0.6, 1.75], label: "Pedestrian", trackId: tid++,
+    trajectory: (t) => ({ x: 30 + t * 1.4, y: RIGHT_SIDEWALK_Y, heading: 0, speed: 1.4 }),
   });
   actors.push({
-    id: "p2", type: "pedestrian", size: [0.7, 0.7, 1.7], label: "Ped", trackId: 21,
-    trajectory: (t) => ({ x: 35 - t * 0.8, y: -8, heading: Math.PI, speed: 0.8 }),
+    id: "p_walk2", type: "pedestrian", size: [0.6, 0.6, 1.65], label: "Pedestrian", trackId: tid++,
+    trajectory: (t) => ({ x: 50 - t * 1.2, y: RIGHT_SIDEWALK_Y + 0.5, heading: Math.PI, speed: 1.2 }),
+  });
+  // Standing on left sidewalk
+  actors.push({
+    id: "p_stand1", type: "pedestrian", size: [0.6, 0.6, 1.7], label: "Pedestrian", trackId: tid++,
+    trajectory: () => ({ x: 35, y: LEFT_SIDEWALK_Y, heading: -Math.PI / 2, speed: 0 }),
   });
   actors.push({
-    id: "p3", type: "pedestrian", size: [0.8, 0.8, 1.75], label: "Ped", trackId: 22,
-    trajectory: () => ({ x: 15, y: 6.5, heading: 0, speed: 0 }),
-  });
-  actors.push({
-    id: "p4", type: "pedestrian", size: [0.7, 0.7, 1.65], label: "Ped", trackId: 23,
-    trajectory: (t) => ({ x: 28, y: 10 - t * 1.0, heading: -Math.PI / 2, speed: 1.0 }),
-  });
-  actors.push({
-    id: "p5", type: "pedestrian", size: [0.8, 0.8, 1.8], label: "Ped", trackId: 24,
-    trajectory: () => ({ x: 42, y: -7.5, heading: 0, speed: 0 }),
-  });
-  actors.push({
-    id: "p6", type: "pedestrian", size: [0.75, 0.75, 1.7], label: "Ped", trackId: 25,
-    trajectory: (t) => {
-      const start = 8;
-      if (t < start) return { x: 50, y: 7, heading: -Math.PI / 2, speed: 0 };
-      return { x: 50, y: 7 - (t - start) * 1.2, heading: -Math.PI / 2, speed: 1.2 };
-    },
+    id: "p_walk3", type: "pedestrian", size: [0.6, 0.6, 1.8], label: "Pedestrian", trackId: tid++,
+    trajectory: (t) => ({ x: 60 + t * 1.3, y: LEFT_SIDEWALK_Y + 0.3, heading: 0, speed: 1.3 }),
   });
 
-  // ── Cyclists ──
+  // === CYCLISTS ===
   actors.push({
-    id: "c1", type: "cyclist", size: [1.8, 0.7, 1.7], label: "Cyclist", trackId: 30,
-    trajectory: (t) => ({ x: 5 + t * 4.5, y: 3.5, heading: 0, speed: 4.5 }),
-  });
-  actors.push({
-    id: "c2", type: "cyclist", size: [1.8, 0.7, 1.7], label: "Cyclist", trackId: 31,
-    trajectory: (t) => ({ x: 55 - t * 3.5, y: -3.5, heading: Math.PI, speed: 3.5 }),
+    id: "c1", type: "cyclist", size: [1.8, 0.7, 1.7], label: "Cyclist", trackId: tid++,
+    trajectory: (t) => ({
+      x: 8 + t * 6.0,
+      y: -(LANE_WIDTH + 0.8), // right edge bike lane
+      heading: 0, speed: 6.0,
+    }),
   });
 
-  // ── Signs ──
+  // === SIGNS ===
   actors.push({
-    id: "s1", type: "sign", size: [0.1, 0.8, 1.2], label: "Sign", trackId: 40,
-    trajectory: () => ({ x: 25, y: 10, heading: 0, speed: 0 }),
+    id: "s1", type: "sign", size: [0.1, 0.8, 1.5], label: "Speed Limit", trackId: tid++,
+    trajectory: () => ({ x: 28, y: PARKING_RIGHT_Y - 1.5, heading: 0, speed: 0 }),
   });
   actors.push({
-    id: "s2", type: "sign", size: [0.1, 0.6, 0.8], label: "Sign", trackId: 41,
-    trajectory: () => ({ x: 48, y: -10, heading: Math.PI / 2, speed: 0 }),
+    id: "s2", type: "sign", size: [0.1, 0.6, 0.9], label: "Stop Sign", trackId: tid++,
+    trajectory: () => ({ x: 70, y: PARKING_RIGHT_Y - 1.5, heading: 0, speed: 0 }),
+  });
+  actors.push({
+    id: "s3", type: "sign", size: [0.1, 0.8, 1.2], label: "Yield", trackId: tid++,
+    trajectory: () => ({ x: 50, y: PARKING_LEFT_Y + 1.5, heading: Math.PI, speed: 0 }),
   });
 
   return actors;
 }
 
+// ── Incident-specific actors ──────────────────────────────────────
+
+function makeIncidentActors(scenario: MockScenario): ActorDef[] {
+  const actors: ActorDef[] = [];
+  let tid = 100;
+
+  switch (scenario) {
+    case "near_miss": {
+      // Vehicle in left lane suddenly swerves into ego lane
+      actors.push({
+        id: "v_nearmiss", type: "vehicle", size: [4.7, 2.0, 1.6], label: "Near-Miss Vehicle", trackId: tid++,
+        trajectory: (t) => {
+          const swerveStart = 5.0;
+          const swerveEnd = 7.0;
+          const baseY = LEFT_LANE_Y;
+          const targetY = EGO_LANE_Y + 0.3; // almost in ego lane
+          let y = baseY;
+          if (t > swerveStart && t < swerveEnd) {
+            const p = smoothstep((t - swerveStart) / (swerveEnd - swerveStart));
+            y = lerp(baseY, targetY, p);
+          } else if (t >= swerveEnd && t < swerveEnd + 1.5) {
+            const p = smoothstep((t - swerveEnd) / 1.5);
+            y = lerp(targetY, baseY, p);
+          } else if (t >= swerveEnd + 1.5) {
+            y = baseY;
+          }
+          const headingOffset = t > swerveStart && t < swerveEnd + 1.5
+            ? Math.sin((t - swerveStart) / (swerveEnd + 1.5 - swerveStart) * Math.PI) * -0.25
+            : 0;
+          return { x: 15 + t * 11.0, y, heading: headingOffset, speed: 11.0 };
+        },
+      });
+      break;
+    }
+
+    case "rear_end": {
+      // Slow vehicle ahead, suddenly brakes hard
+      actors.push({
+        id: "v_braking", type: "vehicle", size: [4.8, 2.1, 1.7], label: "Braking Vehicle", trackId: tid++,
+        trajectory: (t) => {
+          const brakeStart = 6.0;
+          let speed = 12.0;
+          let x: number;
+          if (t < brakeStart) {
+            x = 20 + t * speed;
+          } else {
+            const dt = t - brakeStart;
+            // Decelerate from 12 to 0 over ~2.4 seconds (5 m/s²)
+            speed = Math.max(0, 12.0 - 5.0 * dt);
+            const brakeDist = 12.0 * dt - 0.5 * 5.0 * dt * dt;
+            x = 20 + brakeStart * 12.0 + Math.max(0, brakeDist);
+          }
+          return { x, y: EGO_LANE_Y, heading: 0, speed };
+        },
+      });
+      // Brake lights effect — add stopped car after collision
+      actors.push({
+        id: "v_behind_brake", type: "vehicle", size: [4.5, 2.0, 1.6], label: "Following Car", trackId: tid++,
+        trajectory: (t) => ({
+          x: -10 + t * EGO_SPEED * 0.95,
+          y: EGO_LANE_Y + 0.2,
+          heading: 0, speed: EGO_SPEED * 0.95,
+        }),
+      });
+      break;
+    }
+
+    case "jaywalker": {
+      // Pedestrian suddenly darts across the road from between parked cars
+      actors.push({
+        id: "p_jaywalker", type: "pedestrian", size: [0.7, 0.7, 1.75], label: "Jaywalker", trackId: tid++,
+        trajectory: (t) => {
+          const dartStart = 4.0;
+          const dartSpeed = 2.8; // running speed
+          if (t < dartStart) {
+            // Hidden behind parked cars on right side
+            return { x: 45, y: PARKING_RIGHT_Y + 0.5, heading: Math.PI / 2, speed: 0 };
+          }
+          const dt = t - dartStart;
+          return {
+            x: 45 + dt * 0.3, // slight forward motion
+            y: PARKING_RIGHT_Y + 0.5 + dt * dartSpeed,
+            heading: Math.PI / 2,
+            speed: dartSpeed,
+          };
+        },
+      });
+      // A second pedestrian following behind
+      actors.push({
+        id: "p_jaywalker2", type: "pedestrian", size: [0.6, 0.6, 1.6], label: "Child", trackId: tid++,
+        trajectory: (t) => {
+          const dartStart = 5.0; // 1 second later
+          if (t < dartStart) {
+            return { x: 45.5, y: PARKING_RIGHT_Y + 0.3, heading: Math.PI / 2, speed: 0 };
+          }
+          const dt = t - dartStart;
+          return {
+            x: 45.5 + dt * 0.2,
+            y: PARKING_RIGHT_Y + 0.3 + dt * 3.2, // child runs faster
+            heading: Math.PI / 2,
+            speed: 3.2,
+          };
+        },
+      });
+      break;
+    }
+
+    case "red_light_runner": {
+      // Cross-traffic vehicle runs through intersection from the left
+      actors.push({
+        id: "v_redlight", type: "vehicle", size: [5.0, 2.1, 1.8], label: "Red-Light Runner", trackId: tid++,
+        trajectory: (t) => {
+          const enterTime = 5.0;
+          const crossSpeed = 16.0; // fast
+          if (t < enterTime) {
+            return { x: 55, y: 30 - (enterTime - t) * crossSpeed * 0.5, heading: -Math.PI / 2, speed: crossSpeed };
+          }
+          const dt = t - enterTime;
+          return {
+            x: 55 + dt * 2.0, // slight forward drift
+            y: 30 - dt * crossSpeed,
+            heading: -Math.PI / 2 - dt * 0.05,
+            speed: crossSpeed,
+          };
+        },
+      });
+      // Another vehicle slamming brakes at intersection
+      actors.push({
+        id: "v_stopline", type: "vehicle", size: [4.6, 2.0, 1.5], label: "Stopped Car", trackId: tid++,
+        trajectory: (t) => {
+          if (t < 4.5) return { x: 50, y: ONCOMING_RIGHT_Y, heading: Math.PI, speed: 5.0 };
+          return { x: 50, y: ONCOMING_RIGHT_Y, heading: Math.PI, speed: 0 };
+        },
+      });
+      break;
+    }
+
+    case "swerving_vehicle": {
+      // Erratic driver weaving between lanes
+      actors.push({
+        id: "v_swerve", type: "vehicle", size: [4.9, 2.1, 1.7], label: "Swerving Vehicle", trackId: tid++,
+        trajectory: (t) => {
+          const baseSpeed = 13.0;
+          const swerveAmplitude = LANE_WIDTH * 0.8;
+          const swerveFreq = 0.4; // Hz
+          const y = EGO_LANE_Y + swerveAmplitude * Math.sin(2 * Math.PI * swerveFreq * t);
+          const dy = swerveAmplitude * 2 * Math.PI * swerveFreq * Math.cos(2 * Math.PI * swerveFreq * t);
+          const heading = Math.atan2(dy, baseSpeed);
+          return { x: 20 + t * baseSpeed, y, heading, speed: baseSpeed };
+        },
+      });
+      break;
+    }
+
+    case "normal":
+    default:
+      // No additional incident actors
+      break;
+  }
+
+  return actors;
+}
+
+// ── Scenario metadata (for UI) ────────────────────────────────────
+
+export interface IncidentWindow {
+  startTime: number;   // seconds
+  endTime: number;     // seconds
+  peakTime: number;    // most dangerous moment
+  description: string; // what's happening
+}
+
+export interface ScenarioMeta {
+  label: string;
+  description: string;
+  severity: "none" | "warning" | "critical";
+  incident: IncidentWindow | null;
+}
+
+export const SCENARIO_INFO: Record<MockScenario, ScenarioMeta> = {
+  normal: {
+    label: "Normal Driving",
+    description: "Standard city traffic flow",
+    severity: "none",
+    incident: null,
+  },
+  near_miss: {
+    label: "Near Miss",
+    description: "Vehicle swerves into ego lane",
+    severity: "warning",
+    incident: { startTime: 5.0, endTime: 8.5, peakTime: 6.5, description: "Vehicle swerving into lane" },
+  },
+  rear_end: {
+    label: "Rear-End Risk",
+    description: "Vehicle ahead brakes hard",
+    severity: "critical",
+    incident: { startTime: 6.0, endTime: 8.4, peakTime: 7.5, description: "Hard braking ahead" },
+  },
+  jaywalker: {
+    label: "Jaywalker",
+    description: "Pedestrian darts from parked cars",
+    severity: "critical",
+    incident: { startTime: 4.0, endTime: 7.0, peakTime: 5.0, description: "Pedestrian in roadway" },
+  },
+  red_light_runner: {
+    label: "Red Light Runner",
+    description: "Cross-traffic runs intersection",
+    severity: "critical",
+    incident: { startTime: 4.5, endTime: 7.0, peakTime: 5.5, description: "Vehicle running red light" },
+  },
+  swerving_vehicle: {
+    label: "Swerving Vehicle",
+    description: "Erratic driver weaving between lanes",
+    severity: "warning",
+    incident: { startTime: 2.0, endTime: 16.0, peakTime: 6.0, description: "Erratic lane changes" },
+  },
+};
+
+export const ALL_SCENARIOS: MockScenario[] = [
+  "normal", "near_miss", "rear_end", "jaywalker", "red_light_runner", "swerving_vehicle",
+];
+
+// ── Static world geometry (buildings, curbs, poles, etc.) ─────────
+// These are world-fixed objects that the LiDAR ray-tracer will hit,
+// giving the visual impression of motion as ego drives through them.
+// They appear in the point cloud but NOT in the perception bounding boxes.
+
+interface WorldObject {
+  worldX: number;  // world X position (along road)
+  worldY: number;  // world Y position (across road)
+  sx: number; sy: number; sz: number;
+  heading: number;
+}
+
+function buildWorldScenery(): WorldObject[] {
+  const scenery: WorldObject[] = [];
+  const totalDist = (NUM_FRAMES / FPS) * EGO_SPEED + MAX_RANGE + 20;
+
+  // === CURBS (continuous low walls along road edges) ===
+  // Right curb
+  for (let x = -MAX_RANGE; x < totalDist; x += 2.0) {
+    scenery.push({ worldX: x, worldY: -(LANE_WIDTH + ROAD_SHOULDER), sx: 2.0, sy: 0.3, sz: 0.15, heading: 0 });
+  }
+  // Left curb (before median)
+  for (let x = -MAX_RANGE; x < totalDist; x += 2.0) {
+    scenery.push({ worldX: x, worldY: LANE_WIDTH + 0.5, sx: 2.0, sy: 0.2, sz: 0.12, heading: 0 });
+  }
+  // Far left curb
+  for (let x = -MAX_RANGE; x < totalDist; x += 2.0) {
+    scenery.push({ worldX: x, worldY: ONCOMING_LEFT_Y + LANE_WIDTH / 2 + ROAD_SHOULDER, sx: 2.0, sy: 0.3, sz: 0.15, heading: 0 });
+  }
+
+  // === BUILDINGS (right side - tall walls set back from road) ===
+  const bldgYRight = -(LANE_WIDTH + ROAD_SHOULDER + 6.0);
+  for (let x = -20; x < totalDist; x += rand(12, 22)) {
+    const w = rand(8, 18);
+    const h = rand(4, 12);
+    const d = rand(6, 14);
+    scenery.push({ worldX: x + w / 2, worldY: bldgYRight - d / 2, sx: w, sy: d, sz: h, heading: rand(-0.02, 0.02) });
+  }
+
+  // === BUILDINGS (left side) ===
+  const bldgYLeft = ONCOMING_LEFT_Y + LANE_WIDTH / 2 + ROAD_SHOULDER + 5.0;
+  for (let x = -10; x < totalDist; x += rand(14, 25)) {
+    const w = rand(10, 20);
+    const h = rand(3, 10);
+    const d = rand(6, 12);
+    scenery.push({ worldX: x + w / 2, worldY: bldgYLeft + d / 2, sx: w, sy: d, sz: h, heading: rand(-0.02, 0.02) });
+  }
+
+  // === LIGHT POLES (right side) ===
+  for (let x = 5; x < totalDist; x += rand(20, 35)) {
+    scenery.push({
+      worldX: x, worldY: -(LANE_WIDTH + ROAD_SHOULDER + 1.0),
+      sx: 0.25, sy: 0.25, sz: 6.0, heading: 0,
+    });
+  }
+  // === LIGHT POLES (left side) ===
+  for (let x = 15; x < totalDist; x += rand(25, 40)) {
+    scenery.push({
+      worldX: x, worldY: ONCOMING_LEFT_Y + LANE_WIDTH / 2 + ROAD_SHOULDER + 1.0,
+      sx: 0.25, sy: 0.25, sz: 6.0, heading: 0,
+    });
+  }
+
+  // === TREES (irregular spacing, right side) ===
+  for (let x = 0; x < totalDist; x += rand(8, 18)) {
+    const ty = -(LANE_WIDTH + ROAD_SHOULDER + 3.5);
+    // Trunk
+    scenery.push({ worldX: x, worldY: ty, sx: 0.35, sy: 0.35, sz: 3.5, heading: 0 });
+    // Canopy (elevated box — we store height 7m so cz=3.5 which puts it at the right spot)
+    scenery.push({ worldX: x, worldY: ty, sx: 3.0, sy: 3.0, sz: 7.0, heading: rand(0, Math.PI) });
+  }
+
+  // === TREES (left side) ===
+  for (let x = 10; x < totalDist; x += rand(10, 20)) {
+    const ty = bldgYLeft - 2.0;
+    scenery.push({ worldX: x, worldY: ty, sx: 0.3, sy: 0.3, sz: 3.0, heading: 0 });
+    scenery.push({ worldX: x, worldY: ty, sx: 2.5, sy: 2.5, sz: 6.0, heading: rand(0, Math.PI) });
+  }
+
+  // === MEDIAN BARRIERS (low concrete walls in center) ===
+  for (let x = -MAX_RANGE; x < totalDist; x += 3.0) {
+    scenery.push({
+      worldX: x, worldY: LANE_WIDTH + 0.5,
+      sx: 3.0, sy: 0.6, sz: 0.8, heading: 0,
+    });
+  }
+
+  return scenery;
+}
+
+// Memoize world scenery so it's only built once
+let _cachedScenery: WorldObject[] | null = null;
+function getWorldScenery(): WorldObject[] {
+  if (!_cachedScenery) _cachedScenery = buildWorldScenery();
+  return _cachedScenery;
+}
+
+// ── Ego trajectory per scenario ───────────────────────────────────
+// Returns { x, y, yaw } in world coordinates for the ego at time t.
+
+interface EgoPose { x: number; y: number; yaw: number; }
+
+function getEgoTrajectory(scenario: MockScenario): (t: number) => EgoPose {
+  switch (scenario) {
+    case "rear_end": {
+      // Ego approaches car ahead, brakes hard at ~6.5s, comes to near-stop
+      const brakeStart = 6.5;
+      const decel = 6.0; // m/s²
+      return (t) => {
+        if (t <= brakeStart) {
+          return { x: t * EGO_SPEED, y: 0, yaw: 0 };
+        }
+        const dt = t - brakeStart;
+        const dist = EGO_SPEED * dt - 0.5 * decel * dt * dt;
+        return { x: brakeStart * EGO_SPEED + Math.max(0, dist), y: 0, yaw: 0 };
+      };
+    }
+    case "jaywalker": {
+      // Ego sees pedestrian, emergency brakes at ~4.5s
+      const brakeStart = 4.5;
+      const decel = 7.5; // hard emergency braking
+      return (t) => {
+        if (t <= brakeStart) return { x: t * EGO_SPEED, y: 0, yaw: 0 };
+        const dt = t - brakeStart;
+        const dist = EGO_SPEED * dt - 0.5 * decel * dt * dt;
+        return { x: brakeStart * EGO_SPEED + Math.max(0, dist), y: 0, yaw: 0 };
+      };
+    }
+    case "near_miss": {
+      // Ego brakes slightly and swerves right to avoid
+      const reactStart = 5.5;
+      const reactEnd = 8.0;
+      return (t) => {
+        let speed = EGO_SPEED;
+        let y = 0;
+        let yaw = 0;
+        if (t > reactStart && t < reactEnd) {
+          const p = (t - reactStart) / (reactEnd - reactStart);
+          // Brake slightly
+          speed = EGO_SPEED * lerp(1, 0.7, smoothstep(p < 0.5 ? p * 2 : 2 - p * 2));
+          // Swerve right
+          const swerve = Math.sin(p * Math.PI) * -1.2;
+          y = swerve;
+          yaw = Math.cos(p * Math.PI) * 0.08;
+        }
+        // Integrate position (approximate)
+        let x: number;
+        if (t <= reactStart) {
+          x = t * EGO_SPEED;
+        } else if (t < reactEnd) {
+          const dt = t - reactStart;
+          x = reactStart * EGO_SPEED + dt * speed;
+        } else {
+          // After reaction, resume
+          const reactDist = (reactEnd - reactStart) * EGO_SPEED * 0.85;
+          x = reactStart * EGO_SPEED + reactDist + (t - reactEnd) * EGO_SPEED;
+        }
+        return { x, y, yaw };
+      };
+    }
+    case "red_light_runner": {
+      // Ego brakes hard when cross-traffic appears
+      const brakeStart = 5.0;
+      const decel = 6.5;
+      return (t) => {
+        if (t <= brakeStart) return { x: t * EGO_SPEED, y: 0, yaw: 0 };
+        const dt = t - brakeStart;
+        const dist = EGO_SPEED * dt - 0.5 * decel * dt * dt;
+        return { x: brakeStart * EGO_SPEED + Math.max(0, dist), y: 0, yaw: 0 };
+      };
+    }
+    case "swerving_vehicle": {
+      // Ego brakes slightly and gives space
+      return (t) => {
+        const speed = t > 3 ? EGO_SPEED * 0.85 : EGO_SPEED;
+        const x = t <= 3 ? t * EGO_SPEED : 3 * EGO_SPEED + (t - 3) * speed;
+        return { x, y: 0, yaw: 0 };
+      };
+    }
+    case "normal":
+    default:
+      return (t) => ({ x: t * EGO_SPEED, y: 0, yaw: 0 });
+  }
+}
+
 // ── Public API ─────────────────────────────────────────────────────
 
-let cachedScene: SceneData | null = null;
+const sceneCache = new Map<string, SceneData>();
 
-export function generateSceneData(): SceneData {
-  if (cachedScene) return cachedScene;
+export function generateSceneData(scenario: MockScenario = "normal"): SceneData {
+  const cached = sceneCache.get(scenario);
+  if (cached) return cached;
 
-  const actors = makeActors();
+  const baseActors = makeBaseTraffic();
+  const incidentActors = makeIncidentActors(scenario);
+  const allActors = [...baseActors, ...incidentActors];
+  const worldScenery = getWorldScenery();
+  const egoTraj = getEgoTrajectory(scenario);
   const totalSeconds = NUM_FRAMES / FPS;
   const frames: FrameData[] = [];
 
   for (let fi = 0; fi < NUM_FRAMES; fi++) {
     const t = fi / FPS;
 
-    // Ego drives forward
-    const egoX = t * 8;
-    const egoY = 0;
-    const egoYaw = 0;
+    // Ego position from scenario-aware trajectory
+    const ego = egoTraj(t);
+    const egoX = ego.x;
+    const egoY = ego.y;
+    const egoYaw = ego.yaw;
 
+    // Build perception boxes (actors only — these are the labeled detections)
     const boxes: BBox3D[] = [];
-    for (const actor of actors) {
+    for (const actor of allActors) {
       const pose = actor.trajectory(t);
       const relX = pose.x - egoX;
       const relY = pose.y - egoY;
@@ -398,7 +754,7 @@ export function generateSceneData(): SceneData {
         type: actor.type,
         cx: relX,
         cy: relY,
-        cz: actor.size[2] / 2,  // bottom at ground
+        cz: actor.size[2] / 2,
         sx: actor.size[0],
         sy: actor.size[1],
         sz: actor.size[2],
@@ -409,9 +765,221 @@ export function generateSceneData(): SceneData {
       });
     }
 
-    // Generate realistic LiDAR with ray-tracing
-    const lidar = generateLidarFrame(boxes);
+    // Build LiDAR boxes = perception boxes + world scenery (ego-relative)
+    // World scenery is only for LiDAR ray-tracing, NOT shown as detections
+    const lidarBoxes: BBox3D[] = [...boxes];
+    for (const obj of worldScenery) {
+      const relX = obj.worldX - egoX;
+      const relY = obj.worldY - egoY;
+      if (Math.abs(relX) > MAX_RANGE + 5 || Math.abs(relY) > MAX_RANGE + 5) continue;
+      lidarBoxes.push({
+        id: "_scenery", type: "vehicle",  // type doesn't matter for LiDAR
+        cx: relX, cy: relY, cz: obj.sz / 2,
+        sx: obj.sx, sy: obj.sy, sz: obj.sz,
+        heading: obj.heading,
+        speed: 0, label: "", trackId: -1,
+      });
+    }
 
+    const lidar = generateLidarFrame(lidarBoxes);
+
+    frames.push({
+      timestamp: t,
+      egoPosition: [egoX, egoY, 0],
+      egoYaw,
+      boxes,   // Only perception boxes — no scenery
+      pointPositions: lidar.positions,
+      pointAttributes: lidar.attributes,
+      pointCount: lidar.count,
+    });
+  }
+
+  const data: SceneData = { frames, fps: FPS, totalSeconds, totalFrames: NUM_FRAMES };
+  sceneCache.set(scenario, data);
+  return data;
+}
+
+// ── Custom scenario from AI ───────────────────────────────────────
+
+export interface CustomActorDef {
+  type: ActorType;
+  label: string;
+  size: [number, number, number];
+  startX: number;
+  startY: number;
+  heading: number;
+  speed: number;
+  // Optional events: time-triggered changes
+  events?: Array<{
+    time: number;
+    speed?: number;
+    targetY?: number;
+    heading?: number;
+  }>;
+}
+
+export interface CustomScenarioDef {
+  name: string;
+  description: string;
+  severity: "none" | "warning" | "critical";
+  ego: {
+    speed: number;
+    events?: Array<{
+      time: number;
+      action: "brake" | "swerve_left" | "swerve_right" | "accelerate" | "stop";
+      intensity?: number; // 0-1
+    }>;
+  };
+  actors: CustomActorDef[];
+  incident?: {
+    startTime: number;
+    endTime: number;
+    peakTime: number;
+    description: string;
+  };
+}
+
+function customActorToActorDef(actor: CustomActorDef, index: number): ActorDef {
+  return {
+    id: `custom_${index}`,
+    type: actor.type,
+    size: actor.size,
+    label: actor.label,
+    trackId: 200 + index,
+    trajectory: (t) => {
+      let x = actor.startX + t * actor.speed * Math.cos(actor.heading);
+      let y = actor.startY + t * actor.speed * Math.sin(actor.heading);
+      let heading = actor.heading;
+      let speed = actor.speed;
+
+      if (actor.events) {
+        for (const ev of actor.events) {
+          if (t >= ev.time) {
+            const dt = t - ev.time;
+            if (ev.speed !== undefined) speed = ev.speed;
+            if (ev.heading !== undefined) heading = ev.heading;
+            if (ev.targetY !== undefined) {
+              const transitionTime = 2.0;
+              const p = Math.min(1, dt / transitionTime);
+              y = lerp(actor.startY, ev.targetY, smoothstep(p));
+            }
+            x = actor.startX + ev.time * actor.speed * Math.cos(actor.heading)
+                + dt * speed * Math.cos(heading);
+          }
+        }
+      }
+
+      return { x, y, heading, speed };
+    },
+  };
+}
+
+function buildCustomEgoTrajectory(egoDef: CustomScenarioDef["ego"]): (t: number) => EgoPose {
+  const baseSpeed = egoDef.speed || EGO_SPEED;
+
+  return (t) => {
+    let speed = baseSpeed;
+    let y = 0;
+    let yaw = 0;
+    let x = 0;
+
+    // Integrate with events
+    let lastEventTime = 0;
+    let xAccum = 0;
+    let currentSpeed = baseSpeed;
+
+    if (egoDef.events) {
+      // Sort events by time
+      const sorted = [...egoDef.events].sort((a, b) => a.time - b.time);
+
+      for (const ev of sorted) {
+        if (t < ev.time) break;
+
+        // Add distance from last event to this event at current speed
+        xAccum += (ev.time - lastEventTime) * currentSpeed;
+        lastEventTime = ev.time;
+
+        const intensity = ev.intensity ?? 0.8;
+        switch (ev.action) {
+          case "brake":
+            currentSpeed = baseSpeed * (1 - intensity);
+            break;
+          case "stop":
+            currentSpeed = 0;
+            break;
+          case "accelerate":
+            currentSpeed = baseSpeed * (1 + intensity * 0.5);
+            break;
+          case "swerve_left":
+            y = LANE_WIDTH * intensity;
+            yaw = 0.1 * intensity;
+            break;
+          case "swerve_right":
+            y = -LANE_WIDTH * intensity;
+            yaw = -0.1 * intensity;
+            break;
+        }
+      }
+
+      // Add remaining distance
+      x = xAccum + (t - lastEventTime) * currentSpeed;
+    } else {
+      x = t * baseSpeed;
+    }
+
+    return { x, y, yaw };
+  };
+}
+
+export function generateCustomSceneData(def: CustomScenarioDef): SceneData {
+  const cacheKey = `custom_${def.name}_${JSON.stringify(def)}`;
+  const cached = sceneCache.get(cacheKey);
+  if (cached) return cached;
+
+  const baseActors = makeBaseTraffic();
+  const customActors = def.actors.map((a, i) => customActorToActorDef(a, i));
+  const allActors = [...baseActors, ...customActors];
+  const worldScenery = getWorldScenery();
+  const egoTraj = buildCustomEgoTrajectory(def.ego);
+  const totalSeconds = NUM_FRAMES / FPS;
+  const frames: FrameData[] = [];
+
+  for (let fi = 0; fi < NUM_FRAMES; fi++) {
+    const t = fi / FPS;
+    const ego = egoTraj(t);
+    const egoX = ego.x;
+    const egoY = ego.y;
+    const egoYaw = ego.yaw;
+
+    const boxes: BBox3D[] = [];
+    for (const actor of allActors) {
+      const pose = actor.trajectory(t);
+      const relX = pose.x - egoX;
+      const relY = pose.y - egoY;
+      if (Math.abs(relX) > MAX_RANGE || Math.abs(relY) > MAX_RANGE) continue;
+      boxes.push({
+        id: actor.id, type: actor.type,
+        cx: relX, cy: relY, cz: actor.size[2] / 2,
+        sx: actor.size[0], sy: actor.size[1], sz: actor.size[2],
+        heading: pose.heading - egoYaw,
+        speed: pose.speed, label: actor.label, trackId: actor.trackId,
+      });
+    }
+
+    const lidarBoxes: BBox3D[] = [...boxes];
+    for (const obj of worldScenery) {
+      const relX = obj.worldX - egoX;
+      const relY = obj.worldY - egoY;
+      if (Math.abs(relX) > MAX_RANGE + 5 || Math.abs(relY) > MAX_RANGE + 5) continue;
+      lidarBoxes.push({
+        id: "_scenery", type: "vehicle",
+        cx: relX, cy: relY, cz: obj.sz / 2,
+        sx: obj.sx, sy: obj.sy, sz: obj.sz,
+        heading: obj.heading, speed: 0, label: "", trackId: -1,
+      });
+    }
+
+    const lidar = generateLidarFrame(lidarBoxes);
     frames.push({
       timestamp: t,
       egoPosition: [egoX, egoY, 0],
@@ -423,17 +991,18 @@ export function generateSceneData(): SceneData {
     });
   }
 
-  cachedScene = { frames, fps: FPS, totalSeconds, totalFrames: NUM_FRAMES };
-  return cachedScene;
+  const data: SceneData = { frames, fps: FPS, totalSeconds, totalFrames: NUM_FRAMES };
+  sceneCache.set(cacheKey, data);
+  return data;
 }
 
-// ── Color constants (matching Waymo Perception Studio theme) ──────
+// ── Color constants ───────────────────────────────────────────────
 
 export const BOX_TYPE_COLORS: Record<ActorType, string> = {
-  vehicle: "#FF9E00",     // orange
-  pedestrian: "#CCFF00",  // lemon-lime
-  cyclist: "#DC143C",     // crimson
-  sign: "#FF44FF",        // magenta
+  vehicle: "#FF9E00",
+  pedestrian: "#CCFF00",
+  cyclist: "#DC143C",
+  sign: "#FF44FF",
 };
 
 export const HIGHLIGHT_COLOR = "#00E5FF";

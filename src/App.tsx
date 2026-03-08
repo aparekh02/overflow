@@ -8,6 +8,12 @@ import Scene3D from "./components/Scene3D";
 import ControlPanel from "./components/ControlPanel";
 import Timeline from "./components/Timeline";
 import InfoBar from "./components/InfoBar";
+import IncidentAlert from "./components/IncidentAlert";
+import ScenarioChat from "./components/ScenarioChat";
+import CameraViews from "./components/CameraViews";
+import KnowledgeGraph from "./components/KnowledgeGraph";
+import TicketConsole from "./components/TicketConsole";
+import DataBrowser from "./components/DataBrowser";
 import { useStore } from "./store";
 import type { DataSource } from "./store";
 import { generateSceneData } from "./mockData";
@@ -25,14 +31,22 @@ import { colors, fonts } from "./theme";
 
 async function detectWaymoLayout(
   basePath: string,
+  overrideSegment?: string | null,
 ): Promise<{ basePath: string; segmentName?: string }> {
+  // Use explicit segment from DataBrowser / store
+  if (overrideSegment) {
+    console.log(`[waymo] Explicit segment: ${overrideSegment}`);
+    return { basePath, segmentName: overrideSegment };
+  }
+
   try {
     const resp = await fetch(`${basePath}/manifest.json`);
     if (resp.ok) {
       const manifest = await resp.json();
-      if (manifest.segment) {
-        console.log(`[waymo] Manifest found — segment: ${manifest.segment}`);
-        return { basePath, segmentName: manifest.segment };
+      const segId = manifest.segment;
+      if (segId) {
+        console.log(`[waymo] Manifest found — segment: ${segId}`);
+        return { basePath, segmentName: segId };
       }
     }
   } catch { /* no manifest */ }
@@ -52,6 +66,8 @@ async function detectWaymoLayout(
 function useDataLoader() {
   const dataSource = useStore((s) => s.dataSource);
   const loadStatus = useStore((s) => s.loadStatus);
+  const mockScenario = useStore((s) => s.mockScenario);
+  const waymoSegment = useStore((s) => s.waymoSegment);
   const actions = useStore((s) => s.actions);
 
   useEffect(() => {
@@ -60,11 +76,11 @@ function useDataLoader() {
 
     if (dataSource === "mock") {
       actions.setLoadStatus("loading");
-      actions.setLoadMessage("Generating mock scene…");
+      actions.setLoadMessage(`Generating "${mockScenario}" scenario…`);
       actions.setLoadProgress(0.5);
       setTimeout(() => {
         try {
-          actions.setSceneData(generateSceneData());
+          actions.setSceneData(generateSceneData(mockScenario));
         } catch (e) {
           actions.setLoadError(e instanceof Error ? e.message : String(e));
           actions.setLoadStatus("error");
@@ -75,7 +91,7 @@ function useDataLoader() {
       actions.setLoadMessage("Detecting data layout…");
       actions.setLoadProgress(0);
 
-      detectWaymoLayout("/waymo_data")
+      detectWaymoLayout("/waymo_data", waymoSegment)
         .then(({ basePath, segmentName }) => {
           actions.setLoadMessage("Opening Parquet files…");
           return loadWaymoFromUrls(basePath, (step, progress) => {
@@ -93,7 +109,7 @@ function useDataLoader() {
           actions.setLoadStatus("error");
         });
     }
-  }, [dataSource, loadStatus, actions]);
+  }, [dataSource, loadStatus, mockScenario, waymoSegment, actions]);
 }
 
 // ---------------------------------------------------------------------------
@@ -251,13 +267,14 @@ export default function App() {
 
       {/* Floating top info bar */}
       <InfoBar />
+      <IncidentAlert />
 
       {/* Floating control panel (top-left) */}
       <ControlPanel />
 
-      {/* Data source pills (top-right) */}
+      {/* Data source pills (top-right, above knowledge graph) */}
       <div style={{
-        position: "absolute", top: 52, right: 16, zIndex: 10,
+        position: "absolute", top: 52, right: 8, zIndex: 12,
         display: "flex", gap: 4,
       }}>
         {(["waymo", "mock"] as DataSource[]).map((src) => (
@@ -274,8 +291,26 @@ export default function App() {
         ))}
       </div>
 
+      {/* Camera views (bottom-left) */}
+      <CameraViews />
+
+      {/* Knowledge graph (top-right) */}
+      <KnowledgeGraph />
+
+      {/* Ticket console (bottom-right) */}
+      <TicketConsole />
+
       {/* Floating timeline (bottom) */}
       <Timeline />
+
+      {/* Data browser sidebar */}
+      <DataBrowser />
+
+      {/* AI Scenario Chat */}
+      <ScenarioChat />
+
+      {/* Dataset browser drawer */}
+      <DataBrowser />
 
       {/* Drag overlay */}
       {dragging && (

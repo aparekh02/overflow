@@ -5,14 +5,22 @@
 
 import { colors, fonts } from "../theme";
 import { useStore } from "../store";
+import { SCENARIO_INFO } from "../mockData";
 
 export default function InfoBar() {
   const totalFrames = useStore((s) => s.totalFrames);
   const currentFrameIndex = useStore((s) => s.currentFrameIndex);
   const currentFrame = useStore((s) => s.currentFrame);
   const dataSource = useStore((s) => s.dataSource);
+  const mockScenario = useStore((s) => s.mockScenario);
   const pts = currentFrame?.pointCount ?? 0;
   const boxes = currentFrame?.boxes.length ?? 0;
+  const customScenarioName = useStore((s) => s.customScenarioName);
+  const customSeverity = useStore((s) => s.customSeverity);
+  const isMock = dataSource === "mock";
+  const scenarioInfo = isMock ? SCENARIO_INFO[mockScenario] : null;
+  const displayLabel = customScenarioName ?? scenarioInfo?.label ?? "";
+  const displaySeverity = customSeverity ?? scenarioInfo?.severity ?? "none";
 
   return (
     <div style={{
@@ -51,8 +59,22 @@ export default function InfoBar() {
           marginLeft: 2,
           letterSpacing: "0.3px",
         }}>
-          {dataSource === "mock" ? "Mock" : "Waymo OD v2"}
+          {isMock ? "Mock" : "Waymo OD v2"}
         </span>
+        {isMock && displaySeverity !== "none" && (
+          <span style={{
+            fontSize: 9, fontWeight: 700,
+            color: displaySeverity === "critical" ? "#FF4444" : "#FFB020",
+            background: displaySeverity === "critical" ? "rgba(255,68,68,0.12)" : "rgba(255,176,32,0.12)",
+            padding: "2px 8px",
+            borderRadius: 4,
+            letterSpacing: "0.5px",
+            textTransform: "uppercase",
+            fontFamily: fonts.mono,
+          }}>
+            {displayLabel}
+          </span>
+        )}
       </div>
 
       {/* Right: stats */}
