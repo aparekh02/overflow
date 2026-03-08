@@ -12,7 +12,16 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from openenv.core.env_server.types import Action, Observation, State
+try:
+    from openenv.core.env_server.types import Action, Observation, State
+except ImportError:
+    class Action(BaseModel): pass
+    class Observation(BaseModel):
+        done: bool = False
+        reward: float = 0.0
+    class State(BaseModel):
+        episode_id: str = ""
+        step_count: int = 0
 
 # ── Structured sub-models (frontend-compatible) ─────────────────────────
 

@@ -1,6 +1,10 @@
 """Overflow Environment — Autonomous vehicle fleet oversight for OpenEnv."""
 
-from .client import OverflowEnv
+try:
+    from .client import OverflowEnv
+except ImportError:
+    OverflowEnv = None  # openenv-core not installed; training-only mode
+
 from .models import (
     CarStateData,
     LaneOccupancyData,

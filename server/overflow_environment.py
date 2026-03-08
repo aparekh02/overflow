@@ -15,18 +15,33 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional
 from uuid import uuid4
 
-from openenv.core.env_server.interfaces import Environment
-from openenv.core.env_server.types import State
+try:
+    from openenv.core.env_server.interfaces import Environment
+    from openenv.core.env_server.types import State
+except ImportError:
+    class Environment:  # stub for training-only mode
+        pass
+    class State:
+        pass
 
-from ..models import (
-    CarStateData,
-    LaneOccupancyData,
-    OverflowAction,
-    OverflowObservation,
-    OverflowState,
-    Position,
-    ProximityData,
-)
+try:
+    from ..models import (
+        CarStateData, LaneOccupancyData, OverflowAction,
+        OverflowObservation, OverflowState, Position, ProximityData,
+    )
+    from ..policies.flat_mlp_policy import FlatMLPPolicy
+    from ..policies.ticket_attention_policy import TicketAttentionPolicy
+    from ..policies.policy_spec import OBS_DIM
+    from .policy_adapter import overflow_obs_to_policy_obs, policy_action_to_decision
+except ImportError:
+    from models import (
+        CarStateData, LaneOccupancyData, OverflowAction,
+        OverflowObservation, OverflowState, Position, ProximityData,
+    )
+    from policies.flat_mlp_policy import FlatMLPPolicy
+    from policies.ticket_attention_policy import TicketAttentionPolicy
+    from policies.policy_spec import OBS_DIM
+    from server.policy_adapter import overflow_obs_to_policy_obs, policy_action_to_decision
 
 # --- Constants ---
 NUM_LANES = 3
@@ -253,6 +268,11 @@ class OverflowEnvironment(Environment):
         self._cars: List[Car] = []
         self._rng = random.Random()
         self._done = False
+        self._last_obs: Optional[OverflowObservation] = None
+        self._policies = {
+            "flat_mlp":         FlatMLPPolicy(obs_dim=OBS_DIM),
+            "ticket_attention":  TicketAttentionPolicy(obs_dim=OBS_DIM),
+        }
 
     def _build_observation(
         self,
@@ -332,7 +352,8 @@ class OverflowEnvironment(Environment):
                 )
             )
 
-        return self._build_observation(incident_report="", reward=0.0)
+        self._last_obs = self._build_observation(incident_report="", reward=0.0)
+        return self._last_obs
 
     def step(
         self,
@@ -346,6 +367,18 @@ class OverflowEnvironment(Environment):
                 incident_report="Episode is over. Call reset() to start a new one.",
                 reward=0.0,
             )
+
+        # Policy intercept: decision="policy:flat_mlp" or "policy:ticket_attention"
+        if action.decision.startswith("policy:") and self._last_obs is not None:
+            policy_name = action.decision.split(":", 1)[1].lower()
+            if policy_name in self._policies:
+                obs_vec = overflow_obs_to_policy_obs(self._last_obs)
+                act_vec = self._policies[policy_name].predict(obs_vec)
+                decision, reasoning = policy_action_to_decision(act_vec)
+                action = OverflowAction(
+                    decision=decision,
+                    reasoning=f"[{policy_name}] {reasoning}",
+                )
 
         self._state.step_count += 1
         reward = 0.0
@@ -451,11 +484,12 @@ class OverflowEnvironment(Environment):
             "\n".join(incidents) if incidents else "Observer: No incidents this step."
         )
 
-        return self._build_observation(
+        self._last_obs = self._build_observation(
             incident_report=incident_report,
             reward=reward,
             proximities=proximity_list,
         )
+        return self._last_obs
 
     @property
     def state(self) -> OverflowState:
