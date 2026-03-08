@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-overflow-env"
+version = "0.1.0"
+description = "Overflow Environment for OpenEnv — autonomous vehicle fleet oversight on a 2D road grid"
+requires-python = ">=3.10"
+dependencies = [
+    "openenv-core[core]>=0.2.1",
+    "fastapi>=0.115.0",
+    "pydantic>=2.0.0",
+    "uvicorn[standard]>=0.24.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+server = "overflow_env.server.app:main"
+
+[tool.setuptools]
+packages = ["overflow_env", "overflow_env.server"]
+package-dir = { "overflow_env" = ".", "overflow_env.server" = "server" }
