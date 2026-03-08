@@ -3,46 +3,43 @@
  * Keeps the Three.js renderer intact; replaces surrounding UI with clean panels.
  */
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { toast } from "sonner";
 import {
   LayoutGrid,
   GitBranch,
   Settings2,
   ChevronDown,
-  Zap,
   Clock,
-  ArrowRight,
   X,
 } from "lucide-react";
 import Scene3D from "../components/Scene3D";
 import Timeline from "../components/Timeline";
-import Badge from "../components/ui/Badge";
 import { useStore } from "../store";
-import { useSimManager } from "../lib/simManager";
-import { getOpenEnvMode } from "../lib/openenvClient";
-import { colors, fonts, typeScale, spacing, glass, radius } from "../theme";
-import type { MockScenario } from "../mockData";
-import { SCENARIO_INFO } from "../mockData";
+import { colors, fonts, typeScale, spacing, glass } from "../theme";
+import type { ScenarioId } from "../mockData";
+import { SCENARIO_INFO, SCENE_OBSERVATIONS } from "../mockData";
+import type { SceneObservation } from "../mockData";
+import { generateTrajectoryMoments } from "../utils/trajectoryData";
+import { loadScenario } from "../utils/scenarioLoader";
 
-const SCENARIOS: { id: MockScenario; label: string }[] = [
+const SCENARIOS: { id: ScenarioId | "full_driving"; label: string }[] = [
   { id: "normal", label: "Normal Traffic" },
   { id: "near_miss", label: "Near Miss" },
   { id: "rear_end", label: "Rear End" },
   { id: "jaywalker", label: "Jaywalker" },
   { id: "red_light_runner", label: "Red Light Runner" },
   { id: "swerving_vehicle", label: "Swerving Vehicle" },
+  { id: "final_model", label: "Final Model" },
+  { id: "full_driving", label: "Full Driving" },
 ];
 
 export default function SimPage() {
   const navigate = useNavigate();
-  const [showAutonomy, setShowAutonomy] = useState(true);
-  const [showExplain, setShowExplain] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
   const dataSource = useStore((s) => s.dataSource);
-  const mockScenario = useStore((s) => s.mockScenario);
+  const scenarioId = useStore((s) => s.scenarioId);
   const actions = useStore((s) => s.actions);
   const colormapMode = useStore((s) => s.colormapMode);
   const boxMode = useStore((s) => s.boxMode);
@@ -51,35 +48,23 @@ export default function SimPage() {
   const currentFrameIndex = useStore((s) => s.currentFrameIndex);
   const totalFrames = useStore((s) => s.totalFrames);
   const fps = useStore((s) => s.sceneData?.fps ?? 10);
+  const isPlaying = useStore((s) => s.isPlaying);
 
-  const mainState = useSimManager((s) => s.mainState);
-  const openenvLastUpdate = useSimManager((s) => s.openenvLastUpdate);
-  const simActions = useSimManager((s) => s.actions);
-
-  // Periodic OpenEnv update — syncs real frame data from store automatically
-  useEffect(() => {
-    simActions.syncFromStore();
-    simActions.updateMainFromOpenEnv();
-    const interval = setInterval(() => {
-      simActions.syncFromStore();
-      simActions.updateMainFromOpenEnv();
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [simActions]);
-
-  // Notify on OpenEnv updates
-  useEffect(() => {
-    if (mainState.lastAction) {
-      toast(`OpenEnv: ${mainState.lastAction.action} (reward: ${mainState.lastAction.reward.toFixed(2)})`, {
-        duration: 2000,
-      });
+  const switchScenario = useCallback((id: ScenarioId | "full_driving") => {
+    if (id === "full_driving") {
+      actions.reset();
+      actions.setDataSource("waymo");
+      return;
     }
-  }, [openenvLastUpdate]);
-
-  const switchScenario = useCallback((id: MockScenario) => {
-    actions.reset();
-    actions.setDataSource("mock");
-    actions.setMockScenario(id);
+    // Instant switch — loadScenario returns from in-memory cache
+    loadScenario(id).then((sceneData) => {
+      actions.setScenarioId(id);
+      actions.setDataSource("scenario");
+      actions.setSceneData(sceneData);
+      actions.setCustomIncident(null);
+      const moments = generateTrajectoryMoments(sceneData);
+      actions.setTrajectoryMoments(moments);
+    });
   }, [actions]);
 
   const currentTime = (currentFrameIndex / fps).toFixed(1);
@@ -104,7 +89,7 @@ export default function SimPage() {
         {/* Scenario selector */}
         <div style={{ pointerEvents: "auto", position: "relative" }}>
           <ScenarioSelector
-            current={mockScenario}
+            current={scenarioId}
             dataSource={dataSource}
             onSelect={switchScenario}
           />
@@ -220,22 +205,34 @@ export default function SimPage() {
           </SettingRow>
           <SettingRow label="Source">
             <div style={{ display: "flex", gap: 2 }}>
-              {(["waymo", "mock"] as const).map((src) => (
+              {(["scenario", "waymo"] as const).map((src) => (
                 <button
                   key={src}
-                  onClick={() => { actions.reset(); actions.setDataSource(src); }}
+                  onClick={() => {
+                    if (src === "scenario") {
+                      loadScenario(scenarioId).then((sceneData) => {
+                        actions.setDataSource("scenario");
+                        actions.setSceneData(sceneData);
+                        const moments = generateTrajectoryMoments(sceneData);
+                        actions.setTrajectoryMoments(moments);
+                      });
+                    } else {
+                      actions.reset();
+                      actions.setDataSource(src);
+                    }
+                  }}
                   style={{
                     padding: "2px 7px",
                     borderRadius: 3,
                     fontSize: 9,
                     fontFamily: fonts.mono,
-                    background: dataSource === src ? "rgba(0,232,157,0.1)" : "transparent",
-                    color: dataSource === src ? colors.accent : colors.textDim,
+                    background: dataSource === src || (src === "scenario" && dataSource === "scenario") ? "rgba(0,232,157,0.1)" : "transparent",
+                    color: dataSource === src || (src === "scenario" && dataSource === "scenario") ? colors.accent : colors.textDim,
                     border: `1px solid ${dataSource === src ? colors.borderAccent : "transparent"}`,
                     cursor: "pointer",
                   }}
                 >
-                  {src}
+                  {src === "scenario" ? "scenarios" : "waymo"}
                 </button>
               ))}
             </div>
@@ -243,44 +240,12 @@ export default function SimPage() {
         </div>
       )}
 
-      {/* ── Right panel: Autonomy Stack ── */}
-      {showAutonomy && (
-        <AutonomyPanel
-          mainState={mainState}
-          onClose={() => setShowAutonomy(false)}
-          onExplain={() => setShowExplain(true)}
-        />
-      )}
-
-      {!showAutonomy && (
-        <button
-          onClick={() => setShowAutonomy(true)}
-          style={{
-            position: "absolute",
-            right: spacing.md,
-            top: 92,
-            zIndex: 20,
-            ...glass,
-            padding: "6px 10px",
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            gap: 5,
-            border: `1px solid ${colors.borderAccent}`,
-          }}
-        >
-          <Zap size={12} color={colors.accent} />
-          <span style={{ ...typeScale.small, color: colors.accent }}>OpenEnv</span>
-        </button>
-      )}
-
-      {/* ── Explain modal ── */}
-      {showExplain && mainState.lastAction && (
-        <ExplainModal
-          action={mainState.lastAction}
-          onClose={() => setShowExplain(false)}
-        />
-      )}
+      {/* ── Right panel: Streaming observation log ── */}
+      <ObservationLog
+        scenarioId={scenarioId}
+        currentTime={parseFloat(currentTime)}
+        isPlaying={isPlaying}
+      />
 
       {/* Timeline (bottom) — reused from existing */}
       <Timeline />
@@ -297,14 +262,15 @@ function ScenarioSelector({
   dataSource,
   onSelect,
 }: {
-  current: MockScenario;
+  current: ScenarioId;
   dataSource: string;
-  onSelect: (id: MockScenario) => void;
+  onSelect: (id: ScenarioId | "full_driving") => void;
 }) {
   const [open, setOpen] = useState(false);
-  const label = dataSource === "mock"
-    ? SCENARIOS.find((s) => s.id === current)?.label || current
-    : "Waymo Data";
+  const isWaymo = dataSource === "waymo" || dataSource === "waymo-drop";
+  const label = isWaymo
+    ? "Full Driving"
+    : SCENARIOS.find((s) => s.id === current)?.label || current;
 
   return (
     <div style={{ position: "relative" }}>
@@ -335,222 +301,182 @@ function ScenarioSelector({
           minWidth: 180,
           zIndex: 100,
         }}>
-          {SCENARIOS.map((s) => (
-            <button
-              key={s.id}
-              onClick={() => { onSelect(s.id); setOpen(false); }}
-              style={{
-                display: "block",
-                width: "100%",
-                padding: "6px 10px",
-                borderRadius: 6,
-                fontSize: 12,
-                textAlign: "left",
-                color: s.id === current ? colors.accent : colors.textSecondary,
-                background: s.id === current ? "rgba(0,232,157,0.06)" : "transparent",
-                border: "none",
-                cursor: "pointer",
-                fontFamily: fonts.sans,
-              }}
-            >
-              {s.label}
-            </button>
-          ))}
+          {SCENARIOS.map((s, i) => {
+            const isActive = s.id === "full_driving"
+              ? isWaymo
+              : !isWaymo && s.id === current;
+            const isFullDriving = s.id === "full_driving";
+            return (
+              <div key={s.id}>
+                {isFullDriving && (
+                  <div style={{
+                    height: 1,
+                    background: "rgba(255,255,255,0.08)",
+                    margin: "4px 6px",
+                  }} />
+                )}
+                <button
+                  onClick={() => { onSelect(s.id); setOpen(false); }}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    fontSize: 12,
+                    textAlign: "left",
+                    color: isActive ? colors.accent : colors.textSecondary,
+                    background: isActive ? "rgba(0,232,157,0.06)" : "transparent",
+                    border: "none",
+                    cursor: "pointer",
+                    fontFamily: fonts.sans,
+                  }}
+                >
+                  {s.label}
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
-function AutonomyPanel({
-  mainState,
-  onClose,
-  onExplain,
+function ObservationLog({
+  scenarioId,
+  currentTime,
+  isPlaying,
 }: {
-  mainState: ReturnType<typeof useSimManager.getState>["mainState"];
-  onClose: () => void;
-  onExplain: () => void;
+  scenarioId: ScenarioId;
+  currentTime: number;
+  isPlaying: boolean;
 }) {
-  const openenvConnected = useSimManager((s) => s.openenvConnected);
-  const openenvLastUpdate = useSimManager((s) => s.openenvLastUpdate);
-  const [countdown, setCountdown] = useState(3);
+  const observations = SCENE_OBSERVATIONS[scenarioId] ?? [];
+  const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Get all observations that should be visible at the current time
+  const visible = observations.filter((o) => o.time <= currentTime);
+
+  // Auto-scroll to bottom when new entries appear
   useEffect(() => {
-    const interval = setInterval(() => {
-      const elapsed = (Date.now() - openenvLastUpdate) / 1000;
-      setCountdown(Math.max(0, Math.round(3 - elapsed)));
-    }, 500);
-    return () => clearInterval(interval);
-  }, [openenvLastUpdate]);
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [visible.length]);
 
-  const la = mainState.lastAction;
-  const mode = getOpenEnvMode();
+  const sevColor = (sev: SceneObservation["severity"]) =>
+    sev === "danger" ? "#FF4444" : sev === "caution" ? "#FFB020" : colors.textDim;
 
   return (
     <div style={{
       position: "absolute",
       right: spacing.md,
-      top: 92,
+      top: "30%",
       zIndex: 20,
-      width: 260,
-      ...glass,
-      padding: spacing.md,
+      width: 320,
+      maxHeight: "calc(100vh - 280px)",
       display: "flex",
       flexDirection: "column",
-      gap: spacing.sm,
+      pointerEvents: "none",
     }}>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <Zap size={13} color={colors.accent} />
-          <span style={{ ...typeScale.h3, color: colors.textPrimary }}>Autonomy Stack</span>
-        </div>
-        <button onClick={onClose} style={{ cursor: "pointer", padding: 2, border: "none", background: "none" }}>
-          <X size={12} color={colors.textDim} />
-        </button>
+      {/* Header label */}
+      <div style={{
+        fontFamily: fonts.mono,
+        fontSize: 9,
+        fontWeight: 600,
+        color: colors.textDim,
+        letterSpacing: "1.5px",
+        textTransform: "uppercase",
+        marginBottom: 6,
+        textAlign: "right",
+        pointerEvents: "auto",
+      }}>
+        scene analysis
       </div>
 
-      {/* Status */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <Badge variant={openenvConnected ? "success" : "warning"} dot>
-          {mode === "real" ? "Connected" : "Mock Mode"}
-        </Badge>
-        <span style={{ ...typeScale.mono, color: colors.textDim }}>
-          next: {countdown}s
-        </span>
-      </div>
-
-      {/* Separator */}
-      <div style={{ height: 1, background: colors.border }} />
-
-      {/* Last action */}
-      {la ? (
-        <>
-          <div>
-            <div style={{ ...typeScale.caption, color: colors.textDim, marginBottom: 4 }}>
-              Last Action
-            </div>
-            <div style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}>
-              <span style={{
-                ...typeScale.mono,
-                fontSize: 13,
-                fontWeight: 600,
-                color: colors.accent,
-              }}>
-                {la.action.replace(/_/g, " ")}
-              </span>
-              <Badge variant={la.reward >= 0.5 ? "success" : la.reward >= 0 ? "info" : "error"}>
-                R: {la.reward.toFixed(2)}
-              </Badge>
-            </div>
-          </div>
-
-          <div style={{ display: "flex", gap: spacing.sm }}>
-            <MiniStat label="Latency" value={`${la.latencyMs}ms`} />
-            <MiniStat label="Cumulative" value={mainState.cumulativeReward.toFixed(2)} />
-          </div>
-
-          <div style={{ display: "flex", gap: spacing.sm }}>
-            <MiniStat label="Branch" value={la.branchId.slice(0, 10)} mono />
-            <MiniStat label="Frame" value={`${mainState.frameIndex}`} />
-          </div>
-
-          {/* Explain button */}
-          <button
-            onClick={onExplain}
-            style={{
-              padding: "6px 10px",
-              borderRadius: 6,
-              background: "rgba(0,232,157,0.06)",
-              border: `1px solid ${colors.borderAccent}`,
-              color: colors.accent,
-              fontSize: 11,
-              fontWeight: 500,
-              fontFamily: fonts.sans,
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              gap: 5,
-            }}
-          >
-            Explain last decision
-            <ArrowRight size={11} />
-          </button>
-        </>
-      ) : (
-        <div style={{ ...typeScale.small, color: colors.textDim, padding: "8px 0" }}>
-          Waiting for first update...
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ExplainModal({
-  action,
-  onClose,
-}: {
-  action: NonNullable<ReturnType<typeof useSimManager.getState>["mainState"]["lastAction"]>;
-  onClose: () => void;
-}) {
-  return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.5)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 100,
-      }}
-    >
+      {/* Log entries */}
       <div
-        onClick={(e) => e.stopPropagation()}
+        ref={scrollRef}
         style={{
-          background: colors.bgCard,
-          border: `1px solid ${colors.border}`,
-          borderRadius: radius.xl,
-          padding: spacing.xl,
-          maxWidth: 480,
-          width: "90%",
+          flex: 1,
+          overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
+          gap: 2,
+          maskImage: "linear-gradient(to bottom, transparent 0%, black 8%, black 100%)",
+          WebkitMaskImage: "linear-gradient(to bottom, transparent 0%, black 8%, black 100%)",
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: spacing.lg }}>
-          <span style={{ ...typeScale.h2, color: colors.textPrimary }}>Decision Explanation</span>
-          <button onClick={onClose} style={{ cursor: "pointer", padding: 4, border: "none", background: "none" }}>
-            <X size={16} color={colors.textDim} />
-          </button>
-        </div>
-        <div style={{ marginBottom: spacing.md }}>
-          <span style={{ ...typeScale.caption, color: colors.textDim }}>Action</span>
-          <div style={{ ...typeScale.h3, color: colors.accent, marginTop: 4 }}>
-            {action.action.replace(/_/g, " ")}
+        {visible.length === 0 && (
+          <div style={{
+            fontFamily: fonts.mono,
+            fontSize: 10,
+            color: colors.textDim,
+            textAlign: "right",
+            padding: "8px 0",
+            opacity: 0.6,
+          }}>
+            {isPlaying ? "initializing scan..." : "press play to begin"}
           </div>
-        </div>
-        <div style={{ marginBottom: spacing.md }}>
-          <span style={{ ...typeScale.caption, color: colors.textDim }}>Reward</span>
-          <div style={{ ...typeScale.h3, color: action.reward >= 0.5 ? colors.success : colors.warning, marginTop: 4 }}>
-            {action.reward.toFixed(3)}
-          </div>
-        </div>
-        <div style={{ marginBottom: spacing.md }}>
-          <span style={{ ...typeScale.caption, color: colors.textDim }}>Reasoning</span>
-          <div style={{ ...typeScale.body, color: colors.textSecondary, marginTop: 4, lineHeight: 1.6 }}>
-            {action.explanation}
-          </div>
-        </div>
-        <div>
-          <span style={{ ...typeScale.caption, color: colors.textDim }}>Branch ID</span>
-          <div style={{ ...typeScale.mono, color: colors.textDim, marginTop: 4 }}>
-            {action.branchId}
-          </div>
-        </div>
+        )}
+
+        {visible.map((obs, i) => {
+          const isLatest = i === visible.length - 1;
+          const c = sevColor(obs.severity);
+
+          return (
+            <div
+              key={`${obs.time}-${i}`}
+              style={{
+                display: "flex",
+                gap: 8,
+                alignItems: "flex-start",
+                opacity: isLatest ? 1 : 0.45,
+                transition: "opacity 0.3s ease",
+              }}
+            >
+              {/* Timestamp */}
+              <span style={{
+                fontFamily: fonts.mono,
+                fontSize: 9,
+                color: colors.textDim,
+                flexShrink: 0,
+                width: 32,
+                textAlign: "right",
+                marginTop: 1,
+                opacity: 0.7,
+              }}>
+                {obs.time.toFixed(1)}s
+              </span>
+
+              {/* Severity dot */}
+              <span style={{
+                width: 5,
+                height: 5,
+                borderRadius: "50%",
+                background: c,
+                flexShrink: 0,
+                marginTop: 4,
+                boxShadow: obs.severity !== "nominal" && isLatest
+                  ? `0 0 6px ${c}80`
+                  : "none",
+              }} />
+
+              {/* Message */}
+              <span style={{
+                fontFamily: fonts.mono,
+                fontSize: 10,
+                color: isLatest
+                  ? (obs.severity === "danger" ? "#FF6B6B" : obs.severity === "caution" ? "#FFD93D" : colors.textSecondary)
+                  : colors.textDim,
+                lineHeight: 1.5,
+                fontWeight: isLatest ? 500 : 400,
+              }}>
+                {obs.message}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -573,22 +499,6 @@ function NavButton({ icon: Icon, label, onClick }: { icon: typeof LayoutGrid; la
         <Icon size={13} color={colors.textSecondary} />
         <span style={{ ...typeScale.small, color: colors.textSecondary }}>{label}</span>
       </button>
-    </div>
-  );
-}
-
-function MiniStat({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div style={{ flex: 1 }}>
-      <div style={{ ...typeScale.caption, color: colors.textDim, fontSize: 8, marginBottom: 2 }}>{label}</div>
-      <div style={{
-        fontSize: 11,
-        fontWeight: 500,
-        fontFamily: mono ? fonts.mono : fonts.sans,
-        color: colors.textSecondary,
-      }}>
-        {value}
-      </div>
     </div>
   );
 }

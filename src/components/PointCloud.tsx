@@ -4,12 +4,13 @@
  * Uses pre-baked LUT for fast colormap, bulk position copy, no computeBoundingSphere.
  */
 
-import { useRef, useMemo } from "react";
+import { useRef, useMemo, useContext } from "react";
 import * as THREE from "three";
 import { useFrame } from "@react-three/fiber";
 import { useStore } from "../store";
 import type { ColormapMode } from "../store";
 import type { FrameData } from "../mockData";
+import { FrameOverrideContext } from "./FrameOverrideContext";
 
 // ── Pre-baked 256-entry LUT colormaps ──────────────────────────
 
@@ -71,13 +72,18 @@ export default function PointCloud() {
   // Read opacity once via subscription (rarely changes)
   const pointOpacity = useStore((s) => s.pointOpacity);
 
+  // Frame override for independent dashboard tiles
+  const frameOverride = useContext(FrameOverrideContext);
+  const overrideRef = useRef(frameOverride);
+  overrideRef.current = frameOverride;
+
   useFrame(() => {
     const geom = geometryRef.current;
     if (!geom) return;
 
-    // Read DIRECTLY from store — NO React re-render triggered
+    // Use override if provided, otherwise read from global store
     const state = useStore.getState();
-    const currentFrame = state.currentFrame;
+    const currentFrame = overrideRef.current ?? state.currentFrame;
     const colormapMode = state.colormapMode;
 
     // Early out if nothing changed

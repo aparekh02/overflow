@@ -10,17 +10,17 @@ import { colors, fonts } from "../theme";
 
 export default function IncidentAlert() {
   const dataSource = useStore((s) => s.dataSource);
-  const mockScenario = useStore((s) => s.mockScenario);
+  const scenarioId = useStore((s) => s.scenarioId);
   const currentFrameIndex = useStore((s) => s.currentFrameIndex);
   const fps = useStore((s) => s.sceneData?.fps ?? 10);
   const customIncident = useStore((s) => s.customIncident);
   const customScenarioName = useStore((s) => s.customScenarioName);
   const customSeverity = useStore((s) => s.customSeverity);
 
-  if (dataSource !== "mock") return null;
+  if (dataSource !== "scenario") return null;
 
   // Use custom incident if present, otherwise use preset scenario
-  const meta = SCENARIO_INFO[mockScenario];
+  const meta = SCENARIO_INFO[scenarioId];
   const incident = customIncident ?? meta.incident;
   const severity = customSeverity ?? meta.severity;
   const label = customScenarioName ?? meta.label;

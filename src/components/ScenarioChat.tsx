@@ -86,7 +86,7 @@ export default function ScenarioChat() {
         const sceneData = generateCustomSceneData(scenario);
         // Set data source first, then load scene data directly (skip reset to avoid race)
         useStore.setState({
-          dataSource: "mock",
+          dataSource: "scenario",
           isPlaying: false,
           customIncident: scenario.incident ? {
             startTime: scenario.incident.startTime,
@@ -337,7 +337,7 @@ export default function ScenarioChat() {
                     try {
                       const sceneData = generateCustomSceneData(msg.scenario!);
                       useStore.setState({
-                        dataSource: "mock",
+                        dataSource: "scenario",
                         isPlaying: false,
                         customIncident: msg.scenario!.incident ? {
                           startTime: msg.scenario!.incident.startTime,

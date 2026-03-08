@@ -1,5 +1,5 @@
 /**
- * Mock data generator — realistic self-driving perception data:
+ * Scene data generator — realistic self-driving perception data:
  *   • Proper 2-lane road with ego driving straight
  *   • Other vehicles in lanes, oncoming traffic, parked cars
  *   • Pedestrians on sidewalks, cyclists in bike lane
@@ -11,13 +11,214 @@
 
 export type ActorType = "vehicle" | "pedestrian" | "cyclist" | "sign";
 
-export type MockScenario =
+export type ScenarioId =
   | "normal"
   | "near_miss"
   | "rear_end"
   | "jaywalker"
   | "red_light_runner"
-  | "swerving_vehicle";
+  | "swerving_vehicle"
+  | "final_model";
+
+export type SceneVariant =
+  | "ground_truth"
+  | "avoid_left"
+  | "avoid_right"
+  | "emergency_brake";
+
+export const ALL_VARIANTS: SceneVariant[] = [
+  "ground_truth", "avoid_left", "avoid_right", "emergency_brake",
+];
+
+export const VARIANT_INFO: Record<SceneVariant, { label: string; description: string }> = {
+  ground_truth: { label: "Ground Truth", description: "" },
+  avoid_left: { label: "Swerve Left", description: "Evasive maneuver — left" },
+  avoid_right: { label: "Swerve Right", description: "Evasive maneuver — right" },
+  emergency_brake: { label: "Emergency Brake", description: "Hard stop" },
+};
+
+export interface VariantMetrics {
+  reward: number;
+  safety: number;
+  ttc: number;       // time-to-collision (seconds) — higher is safer
+  status: "optimal" | "suboptimal" | "dangerous";
+}
+
+/**
+ * Per-scenario, per-variant reward & safety metrics.
+ * Rewards are based on threat geometry:
+ *   - moving away from hazard → high reward
+ *   - neutral action → moderate reward
+ *   - moving toward hazard → negative reward
+ */
+export const VARIANT_METRICS: Record<ScenarioId, Record<SceneVariant, VariantMetrics>> = {
+  normal: {
+    ground_truth: { reward: 0.91, safety: 0.95, ttc: Infinity, status: "optimal" },
+    avoid_left:   { reward: 0.42, safety: 0.78, ttc: Infinity, status: "suboptimal" },
+    avoid_right:  { reward: 0.45, safety: 0.80, ttc: Infinity, status: "suboptimal" },
+    emergency_brake: { reward: 0.31, safety: 0.72, ttc: Infinity, status: "suboptimal" },
+  },
+  near_miss: {
+    // Threat from LEFT lane — swerve right is best, swerve left is worst
+    ground_truth: { reward: -0.72, safety: 0.12, ttc: 1.2, status: "dangerous" },
+    avoid_left:   { reward: -0.45, safety: 0.18, ttc: 0.8,  status: "dangerous" },
+    avoid_right:  { reward:  0.92, safety: 0.94, ttc: 4.7,  status: "optimal" },
+    emergency_brake: { reward: 0.61, safety: 0.71, ttc: 2.3, status: "suboptimal" },
+  },
+  rear_end: {
+    // Threat AHEAD — emergency brake best, lane change OK
+    ground_truth: { reward: -0.84, safety: 0.08, ttc: 0.9, status: "dangerous" },
+    avoid_left:   { reward:  0.73, safety: 0.82, ttc: 3.9,  status: "suboptimal" },
+    avoid_right:  { reward:  0.58, safety: 0.68, ttc: 3.1,  status: "suboptimal" },
+    emergency_brake: { reward: 0.89, safety: 0.93, ttc: 5.2, status: "optimal" },
+  },
+  jaywalker: {
+    // Pedestrian from RIGHT — swerve left best, swerve right worst
+    ground_truth: { reward: -0.91, safety: 0.05, ttc: 0.6, status: "dangerous" },
+    avoid_left:   { reward:  0.94, safety: 0.96, ttc: 5.1,  status: "optimal" },
+    avoid_right:  { reward: -0.67, safety: 0.11, ttc: 0.4,  status: "dangerous" },
+    emergency_brake: { reward: 0.78, safety: 0.85, ttc: 3.4, status: "suboptimal" },
+  },
+  red_light_runner: {
+    // Cross-traffic from LEFT — emergency brake best, swerve left worst
+    ground_truth: { reward: -0.88, safety: 0.06, ttc: 0.7, status: "dangerous" },
+    avoid_left:   { reward: -0.52, safety: 0.15, ttc: 0.5,  status: "dangerous" },
+    avoid_right:  { reward:  0.71, safety: 0.79, ttc: 3.6,  status: "suboptimal" },
+    emergency_brake: { reward: 0.88, safety: 0.92, ttc: 4.8, status: "optimal" },
+  },
+  swerving_vehicle: {
+    // Erratic vehicle ahead — emergency brake best, swerve left risky
+    ground_truth: { reward: -0.58, safety: 0.22, ttc: 1.5, status: "dangerous" },
+    avoid_left:   { reward: -0.23, safety: 0.35, ttc: 1.8,  status: "dangerous" },
+    avoid_right:  { reward:  0.69, safety: 0.76, ttc: 3.8,  status: "suboptimal" },
+    emergency_brake: { reward: 0.84, safety: 0.91, ttc: 5.0, status: "optimal" },
+  },
+  final_model: {
+    // Combined optimal — always takes best action
+    ground_truth: { reward: 0.89, safety: 0.93, ttc: 4.6, status: "optimal" },
+    avoid_left:   { reward: 0.89, safety: 0.93, ttc: 4.6, status: "optimal" },
+    avoid_right:  { reward: 0.89, safety: 0.93, ttc: 4.6, status: "optimal" },
+    emergency_brake: { reward: 0.89, safety: 0.93, ttc: 4.6, status: "optimal" },
+  },
+};
+
+/**
+ * Timestamped scene observations for streaming log overlay.
+ * These describe what's happening in the environment (not agent decisions).
+ */
+export interface SceneObservation {
+  time: number;
+  severity: "nominal" | "caution" | "danger";
+  message: string;
+}
+
+export const SCENE_OBSERVATIONS: Record<ScenarioId, SceneObservation[]> = {
+  normal: [
+    { time: 0.0, severity: "nominal", message: "Ego vehicle active — cruising at 11.0 m/s in right lane" },
+    { time: 1.5, severity: "nominal", message: "LiDAR scan nominal — 3 vehicles, 1 cyclist detected in field of view" },
+    { time: 3.0, severity: "nominal", message: "Traffic flow steady — all adjacent vehicles maintaining lane discipline" },
+    { time: 5.0, severity: "nominal", message: "Oncoming lane clear — no lateral encroachment detected" },
+    { time: 7.0, severity: "nominal", message: "Perception confidence 0.97 — bounding boxes stable across frames" },
+    { time: 9.0, severity: "nominal", message: "Road geometry straight — no curvature, no grade change" },
+    { time: 11.0, severity: "nominal", message: "Following distance 22m to lead vehicle — TTC > 10s" },
+    { time: 13.0, severity: "nominal", message: "No anomalies in sensor sweep — environment nominal" },
+    { time: 15.5, severity: "nominal", message: "Scan complete — 0 incidents logged for this segment" },
+    { time: 18.0, severity: "nominal", message: "Segment ending — all metrics within safe operating envelope" },
+  ],
+  near_miss: [
+    { time: 0.0, severity: "nominal", message: "Ego vehicle active — cruising at 11.0 m/s in right lane" },
+    { time: 1.5, severity: "nominal", message: "Vehicle detected in left lane — tracking ID #100, speed 11.0 m/s" },
+    { time: 3.0, severity: "nominal", message: "Left-lane vehicle holding position — 15m ahead, stable heading" },
+    { time: 4.5, severity: "caution", message: "Left-lane vehicle heading drift detected — yaw offset -0.08 rad" },
+    { time: 5.0, severity: "caution", message: "⚠ Vehicle #100 initiating lateral movement toward ego lane" },
+    { time: 5.5, severity: "danger", message: "⚠ Lane encroachment — vehicle swerving into ego lane, closing at 2.1 m/s lateral" },
+    { time: 6.0, severity: "danger", message: "🚨 Near-miss event — vehicle #100 within 0.3m of ego lane center" },
+    { time: 6.5, severity: "danger", message: "🚨 Peak danger — minimum lateral separation 0.3m, TTC 1.2s" },
+    { time: 7.0, severity: "caution", message: "Vehicle #100 beginning lane recovery — heading correcting" },
+    { time: 8.0, severity: "caution", message: "Vehicle returning to left lane — lateral velocity reversing" },
+    { time: 9.0, severity: "nominal", message: "Lane encroachment resolved — vehicle #100 back in original lane" },
+    { time: 11.0, severity: "nominal", message: "Incident window closed — monitoring resumed" },
+    { time: 14.0, severity: "nominal", message: "No further anomalies — traffic stabilized" },
+  ],
+  rear_end: [
+    { time: 0.0, severity: "nominal", message: "Ego vehicle active — cruising at 11.0 m/s in right lane" },
+    { time: 1.5, severity: "nominal", message: "Lead vehicle detected — ID #100, 20m ahead, speed 12.0 m/s" },
+    { time: 3.0, severity: "nominal", message: "Following distance stable — closing rate 1.0 m/s" },
+    { time: 4.5, severity: "nominal", message: "Trailing vehicle detected — ID #101, 10m behind, speed 12.4 m/s" },
+    { time: 5.5, severity: "caution", message: "Lead vehicle decelerating — brake lights detected, speed dropping" },
+    { time: 6.0, severity: "danger", message: "⚠ Hard braking ahead — lead vehicle decelerating at 5.0 m/s²" },
+    { time: 6.5, severity: "danger", message: "🚨 Following distance critical — gap closing rapidly, TTC 0.9s" },
+    { time: 7.0, severity: "danger", message: "🚨 Collision risk — lead vehicle speed 2.0 m/s, ego still at 11.0 m/s" },
+    { time: 7.5, severity: "danger", message: "🚨 Lead vehicle stopped — ego closing at full speed, impact imminent" },
+    { time: 9.0, severity: "caution", message: "High-risk window persists — ego has not decelerated" },
+    { time: 11.0, severity: "nominal", message: "Lead vehicle resuming — accelerating back to traffic speed" },
+    { time: 14.0, severity: "nominal", message: "Gap restoring — monitoring resumed" },
+  ],
+  jaywalker: [
+    { time: 0.0, severity: "nominal", message: "Ego vehicle active — cruising at 11.0 m/s, parked vehicles on right" },
+    { time: 1.5, severity: "nominal", message: "Scanning road edges — parked cars detected at 3.5m right offset" },
+    { time: 3.0, severity: "nominal", message: "No pedestrians in roadway — sidewalk zones clear" },
+    { time: 3.8, severity: "caution", message: "Motion detected behind parked vehicle at 11m ahead — possible pedestrian" },
+    { time: 4.0, severity: "danger", message: "⚠ Pedestrian entering roadway — darting from between parked cars at 55m" },
+    { time: 4.5, severity: "danger", message: "🚨 Jaywalker in lane — running at 2.5 m/s, crossing path of ego" },
+    { time: 5.0, severity: "danger", message: "🚨 Second pedestrian detected — child following at 3.0 m/s" },
+    { time: 5.5, severity: "danger", message: "🚨 Multiple pedestrians in roadway — TTC 0.6s to nearest" },
+    { time: 6.5, severity: "danger", message: "🚨 Critical — pedestrians still crossing, ego has not braked" },
+    { time: 7.5, severity: "caution", message: "Pedestrians clearing ego lane — lateral offset increasing" },
+    { time: 8.5, severity: "nominal", message: "Pedestrians clear of roadway — crossing complete" },
+    { time: 10.0, severity: "nominal", message: "Incident resolved — road clear, monitoring resumed" },
+  ],
+  red_light_runner: [
+    { time: 0.0, severity: "nominal", message: "Ego vehicle approaching intersection — speed 11.0 m/s" },
+    { time: 1.5, severity: "nominal", message: "Intersection geometry detected — crosswalk zone ahead at 55m" },
+    { time: 3.0, severity: "nominal", message: "Stopped vehicle detected at intersection — waiting at light" },
+    { time: 4.0, severity: "caution", message: "Pedestrian detected at far curb — appears to be preparing to cross" },
+    { time: 4.5, severity: "danger", message: "⚠ Pedestrian ignoring signal — stepping into crosswalk against red" },
+    { time: 5.0, severity: "danger", message: "🚨 Red-light runner — pedestrian sprinting across intersection at 5.0 m/s" },
+    { time: 5.5, severity: "danger", message: "🚨 Collision path — pedestrian crossing ego's forward path, TTC 0.7s" },
+    { time: 6.0, severity: "danger", message: "🚨 Second pedestrian entering crosswalk — following the first" },
+    { time: 7.0, severity: "caution", message: "First pedestrian clearing ego lane — second still in path" },
+    { time: 8.0, severity: "nominal", message: "Crosswalk clearing — pedestrians reaching far side" },
+    { time: 10.0, severity: "nominal", message: "Intersection clear — resuming normal scan" },
+  ],
+  swerving_vehicle: [
+    { time: 0.0, severity: "nominal", message: "Ego vehicle active — cruising at 11.0 m/s in right lane" },
+    { time: 1.0, severity: "caution", message: "Vehicle ahead exhibiting oscillating trajectory — ID #100" },
+    { time: 2.0, severity: "caution", message: "⚠ Erratic behavior — vehicle weaving across lane markings, ±2.8m lateral" },
+    { time: 3.0, severity: "caution", message: "⚠ Swerve frequency 0.4 Hz — consistent oscillation pattern detected" },
+    { time: 4.5, severity: "danger", message: "🚨 Vehicle encroaching ego lane — lateral offset at extremum" },
+    { time: 6.0, severity: "danger", message: "🚨 Peak danger — swerving vehicle at closest approach, TTC 1.5s" },
+    { time: 7.5, severity: "caution", message: "Vehicle swinging back to center — still oscillating" },
+    { time: 9.0, severity: "danger", message: "⚠ Second encroachment — vehicle swerving into ego lane again" },
+    { time: 11.0, severity: "caution", message: "Erratic pattern continuing — no sign of stabilization" },
+    { time: 13.0, severity: "caution", message: "Sustained erratic driving — swerving vehicle still ahead" },
+    { time: 15.0, severity: "caution", message: "Vehicle maintaining erratic trajectory — distance slowly increasing" },
+    { time: 17.0, severity: "nominal", message: "Swerving vehicle pulling ahead — risk level decreasing" },
+  ],
+  final_model: [
+    { time: 0.0, severity: "nominal", message: "TRAINED MODEL ACTIVE — optimal policy loaded, scanning environment" },
+    { time: 0.5, severity: "nominal", message: "Ego cruising at 11.0 m/s — all sensors nominal" },
+    { time: 1.0, severity: "caution", message: "⚠ Left-lane vehicle drifting — near-miss threat detected" },
+    { time: 1.5, severity: "danger", message: "🚨 ACTION: Swerve right — evading left-lane encroachment (R: +0.92)" },
+    { time: 2.5, severity: "nominal", message: "✓ Near-miss avoided — resuming forward trajectory" },
+    { time: 3.5, severity: "caution", message: "⚠ Lead vehicle hard braking — rear-end risk detected" },
+    { time: 4.0, severity: "danger", message: "🚨 ACTION: Emergency brake — stopping before collision (R: +0.89)" },
+    { time: 5.5, severity: "nominal", message: "✓ Rear-end avoided — resuming speed" },
+    { time: 6.0, severity: "caution", message: "⚠ Motion detected at road edge — pedestrian emerging" },
+    { time: 6.5, severity: "danger", message: "🚨 ACTION: Swerve left — evading jaywalker from right (R: +0.94)" },
+    { time: 7.5, severity: "nominal", message: "✓ Jaywalker avoided — pedestrians clear, correcting course" },
+    { time: 9.0, severity: "caution", message: "⚠ Pedestrian at intersection — ignoring red signal" },
+    { time: 9.5, severity: "danger", message: "🚨 ACTION: Emergency brake — stopping before crosswalk (R: +0.88)" },
+    { time: 10.5, severity: "nominal", message: "✓ Red-light runner avoided — intersection clearing" },
+    { time: 11.5, severity: "caution", message: "⚠ Erratic vehicle ahead — oscillating trajectory detected" },
+    { time: 12.0, severity: "danger", message: "🚨 ACTION: Emergency brake — increasing distance from threat (R: +0.84)" },
+    { time: 13.5, severity: "nominal", message: "✓ Safe distance established — swerving vehicle ahead" },
+    { time: 14.5, severity: "nominal", message: "ALL INCIDENTS RESOLVED — 5/5 optimal actions taken, cumulative R: +4.47" },
+  ],
+};
+
+/** @deprecated Use ScenarioId instead */
+export type MockScenario = ScenarioId;
 
 export interface BBox3D {
   id: string;
@@ -311,7 +512,7 @@ function makeBaseTraffic(): ActorDef[] {
 
 // ── Incident-specific actors ──────────────────────────────────────
 
-function makeIncidentActors(scenario: MockScenario): ActorDef[] {
+function makeIncidentActors(scenario: ScenarioId): ActorDef[] {
   const actors: ActorDef[] = [];
   let tid = 100;
 
@@ -378,38 +579,40 @@ function makeIncidentActors(scenario: MockScenario): ActorDef[] {
 
     case "jaywalker": {
       // Pedestrian suddenly darts across the road from between parked cars
+      // Ego at t=4.0 is at x=44, jaywalker at x=55 = 11m ahead
+      // Ego reaches x=55 at t=5.0s, giving ~1s of crossing visibility
       actors.push({
-        id: "p_jaywalker", type: "pedestrian", size: [0.7, 0.7, 1.75], label: "Jaywalker", trackId: tid++,
+        id: "p_jaywalker", type: "pedestrian", size: [0.8, 0.8, 1.75], label: "Jaywalker", trackId: tid++,
         trajectory: (t) => {
           const dartStart = 4.0;
-          const dartSpeed = 2.8; // running speed
+          const dartSpeed = 2.5; // running speed (slightly slower for more tension)
           if (t < dartStart) {
-            // Hidden behind parked cars on right side
-            return { x: 45, y: PARKING_RIGHT_Y + 0.5, heading: Math.PI / 2, speed: 0 };
+            // Waiting at sidewalk edge behind parked cars on right side
+            return { x: 55, y: PARKING_RIGHT_Y + 0.5, heading: Math.PI / 2, speed: 0 };
           }
           const dt = t - dartStart;
           return {
-            x: 45 + dt * 0.3, // slight forward motion
+            x: 55 + dt * 0.2, // slight forward drift
             y: PARKING_RIGHT_Y + 0.5 + dt * dartSpeed,
             heading: Math.PI / 2,
             speed: dartSpeed,
           };
         },
       });
-      // A second pedestrian following behind
+      // A second pedestrian (child) following behind — 1 second later
       actors.push({
-        id: "p_jaywalker2", type: "pedestrian", size: [0.6, 0.6, 1.6], label: "Child", trackId: tid++,
+        id: "p_jaywalker2", type: "pedestrian", size: [0.7, 0.7, 1.65], label: "Child", trackId: tid++,
         trajectory: (t) => {
-          const dartStart = 5.0; // 1 second later
+          const dartStart = 5.0;
           if (t < dartStart) {
-            return { x: 45.5, y: PARKING_RIGHT_Y + 0.3, heading: Math.PI / 2, speed: 0 };
+            return { x: 55.5, y: PARKING_RIGHT_Y + 0.3, heading: Math.PI / 2, speed: 0 };
           }
           const dt = t - dartStart;
           return {
-            x: 45.5 + dt * 0.2,
-            y: PARKING_RIGHT_Y + 0.3 + dt * 3.2, // child runs faster
+            x: 55.5 + dt * 0.2,
+            y: PARKING_RIGHT_Y + 0.3 + dt * 3.0,
             heading: Math.PI / 2,
-            speed: 3.2,
+            speed: 3.0,
           };
         },
       });
@@ -417,25 +620,45 @@ function makeIncidentActors(scenario: MockScenario): ActorDef[] {
     }
 
     case "red_light_runner": {
-      // Cross-traffic vehicle runs through intersection from the left
+      // Pedestrian sprints across intersection against the light from the left
+      // Ego at t=5.0 is at x=55, runner crosses at x=55
       actors.push({
-        id: "v_redlight", type: "vehicle", size: [5.0, 2.1, 1.8], label: "Red-Light Runner", trackId: tid++,
+        id: "p_redlight", type: "pedestrian", size: [0.8, 0.8, 1.80], label: "Red-Light Runner", trackId: tid++,
         trajectory: (t) => {
-          const enterTime = 5.0;
-          const crossSpeed = 16.0; // fast
+          const enterTime = 4.5;
+          const runSpeed = 5.0; // sprinting across
           if (t < enterTime) {
-            return { x: 55, y: 30 - (enterTime - t) * crossSpeed * 0.5, heading: -Math.PI / 2, speed: crossSpeed };
+            // Waiting at far sidewalk, starting from the left side
+            return { x: 55, y: LEFT_SIDEWALK_Y, heading: -Math.PI / 2, speed: 0 };
           }
           const dt = t - enterTime;
           return {
-            x: 55 + dt * 2.0, // slight forward drift
-            y: 30 - dt * crossSpeed,
-            heading: -Math.PI / 2 - dt * 0.05,
-            speed: crossSpeed,
+            x: 55 + dt * 0.3, // slight forward drift
+            y: LEFT_SIDEWALK_Y - dt * runSpeed, // running right (negative y)
+            heading: -Math.PI / 2,
+            speed: runSpeed,
           };
         },
       });
-      // Another vehicle slamming brakes at intersection
+      // A second pedestrian hesitating at the curb then following
+      actors.push({
+        id: "p_redlight2", type: "pedestrian", size: [0.7, 0.7, 1.70], label: "Follower", trackId: tid++,
+        trajectory: (t) => {
+          const enterTime = 5.5; // hesitates 1s longer
+          const runSpeed = 4.2;
+          if (t < enterTime) {
+            return { x: 55.5, y: LEFT_SIDEWALK_Y - 0.5, heading: -Math.PI / 2, speed: 0 };
+          }
+          const dt = t - enterTime;
+          return {
+            x: 55.5 + dt * 0.2,
+            y: LEFT_SIDEWALK_Y - 0.5 - dt * runSpeed,
+            heading: -Math.PI / 2,
+            speed: runSpeed,
+          };
+        },
+      });
+      // Stopped car at intersection
       actors.push({
         id: "v_stopline", type: "vehicle", size: [4.6, 2.0, 1.5], label: "Stopped Car", trackId: tid++,
         trajectory: (t) => {
@@ -460,6 +683,134 @@ function makeIncidentActors(scenario: MockScenario): ActorDef[] {
           return { x: 20 + t * baseSpeed, y, heading, speed: baseSpeed };
         },
       });
+      break;
+    }
+
+    case "final_model": {
+      // Combined gauntlet: all 5 incidents in 15 seconds with time offsets
+      // Each incident's actors are shifted so they appear at the right time/place.
+      // Ego x at time t ≈ t * EGO_SPEED (approximately, before maneuvers)
+
+      // ── 1. Near Miss (t≈1.0s, ego at x≈11) ──
+      // Vehicle in left lane swerves into ego lane
+      actors.push({
+        id: "fm_nearmiss", type: "vehicle", size: [4.7, 2.0, 1.6], label: "Near-Miss Vehicle", trackId: tid++,
+        trajectory: (t) => {
+          const tOff = 1.0; // incident offset
+          const xOff = tOff * EGO_SPEED; // ego position at offset
+          const swerveStart = tOff;
+          const swerveEnd = tOff + 2.0;
+          const baseY = LEFT_LANE_Y;
+          const targetY = EGO_LANE_Y + 0.3;
+          let y = baseY;
+          if (t > swerveStart && t < swerveEnd) {
+            const p = smoothstep((t - swerveStart) / (swerveEnd - swerveStart));
+            y = lerp(baseY, targetY, p);
+          } else if (t >= swerveEnd && t < swerveEnd + 1.0) {
+            const p = smoothstep((t - swerveEnd) / 1.0);
+            y = lerp(targetY, baseY, p);
+          }
+          const headingOff = t > swerveStart && t < swerveEnd + 1.0
+            ? Math.sin((t - swerveStart) / (swerveEnd + 1.0 - swerveStart) * Math.PI) * -0.25 : 0;
+          return { x: xOff + 5 + t * 11.0, y, heading: headingOff, speed: 11.0 };
+        },
+      });
+
+      // ── 2. Rear End (t≈3.5s, ego at x≈38.5) ──
+      // Lead vehicle brakes hard
+      actors.push({
+        id: "fm_braking", type: "vehicle", size: [4.8, 2.1, 1.7], label: "Braking Vehicle", trackId: tid++,
+        trajectory: (t) => {
+          const xOff = 3.5 * EGO_SPEED;
+          const brakeStart = 3.5;
+          let speed = 12.0;
+          let x: number;
+          if (t < brakeStart) {
+            x = xOff + 12 + t * speed;
+          } else {
+            const dt = t - brakeStart;
+            speed = Math.max(0, 12.0 - 5.0 * dt);
+            const brakeDist = 12.0 * dt - 0.5 * 5.0 * dt * dt;
+            x = xOff + 12 + brakeStart * 12.0 + Math.max(0, brakeDist);
+          }
+          return { x, y: EGO_LANE_Y, heading: 0, speed };
+        },
+      });
+
+      // ── 3. Jaywalker (t≈6.5s, ego at x≈71.5) ──
+      // Pedestrian darts from right side
+      const jwXOff = 6.5 * EGO_SPEED + 10; // 10m ahead of ego at t=6.5
+      actors.push({
+        id: "fm_jaywalker", type: "pedestrian", size: [0.8, 0.8, 1.75], label: "Jaywalker", trackId: tid++,
+        trajectory: (t) => {
+          const dartStart = 6.5;
+          const dartSpeed = 2.5;
+          if (t < dartStart) {
+            return { x: jwXOff, y: PARKING_RIGHT_Y + 0.5, heading: Math.PI / 2, speed: 0 };
+          }
+          const dt = t - dartStart;
+          return {
+            x: jwXOff + dt * 0.2,
+            y: PARKING_RIGHT_Y + 0.5 + dt * dartSpeed,
+            heading: Math.PI / 2,
+            speed: dartSpeed,
+          };
+        },
+      });
+      actors.push({
+        id: "fm_jaywalker2", type: "pedestrian", size: [0.7, 0.7, 1.65], label: "Child", trackId: tid++,
+        trajectory: (t) => {
+          const dartStart = 7.2;
+          if (t < dartStart) {
+            return { x: jwXOff + 0.5, y: PARKING_RIGHT_Y + 0.3, heading: Math.PI / 2, speed: 0 };
+          }
+          const dt = t - dartStart;
+          return {
+            x: jwXOff + 0.5 + dt * 0.2,
+            y: PARKING_RIGHT_Y + 0.3 + dt * 3.0,
+            heading: Math.PI / 2,
+            speed: 3.0,
+          };
+        },
+      });
+
+      // ── 4. Red Light Runner (t≈9.0s) ──
+      // Pedestrian sprints across intersection
+      const rlXOff = 9.0 * EGO_SPEED + 10;
+      actors.push({
+        id: "fm_redlight", type: "pedestrian", size: [0.8, 0.8, 1.80], label: "Red-Light Runner", trackId: tid++,
+        trajectory: (t) => {
+          const enterTime = 9.0;
+          const runSpeed = 5.0;
+          if (t < enterTime) {
+            return { x: rlXOff, y: LEFT_SIDEWALK_Y, heading: -Math.PI / 2, speed: 0 };
+          }
+          const dt = t - enterTime;
+          return {
+            x: rlXOff + dt * 0.3,
+            y: LEFT_SIDEWALK_Y - dt * runSpeed,
+            heading: -Math.PI / 2,
+            speed: runSpeed,
+          };
+        },
+      });
+
+      // ── 5. Swerving Vehicle (t≈11.5s) ──
+      // Erratic driver weaving
+      const svXOff = 11.5 * EGO_SPEED;
+      actors.push({
+        id: "fm_swerve", type: "vehicle", size: [4.9, 2.1, 1.7], label: "Swerving Vehicle", trackId: tid++,
+        trajectory: (t) => {
+          const baseSpeed = 13.0;
+          const swerveAmplitude = LANE_WIDTH * 0.8;
+          const swerveFreq = 0.5;
+          const y = EGO_LANE_Y + swerveAmplitude * Math.sin(2 * Math.PI * swerveFreq * t);
+          const dy = swerveAmplitude * 2 * Math.PI * swerveFreq * Math.cos(2 * Math.PI * swerveFreq * t);
+          const heading = Math.atan2(dy, baseSpeed);
+          return { x: svXOff + 10 + t * baseSpeed, y, heading, speed: baseSpeed };
+        },
+      });
+
       break;
     }
 
@@ -488,7 +839,7 @@ export interface ScenarioMeta {
   incident: IncidentWindow | null;
 }
 
-export const SCENARIO_INFO: Record<MockScenario, ScenarioMeta> = {
+export const SCENARIO_INFO: Record<ScenarioId, ScenarioMeta> = {
   normal: {
     label: "Normal Driving",
     description: "Standard city traffic flow",
@@ -505,19 +856,19 @@ export const SCENARIO_INFO: Record<MockScenario, ScenarioMeta> = {
     label: "Rear-End Risk",
     description: "Vehicle ahead brakes hard",
     severity: "critical",
-    incident: { startTime: 6.0, endTime: 8.4, peakTime: 7.5, description: "Hard braking ahead" },
+    incident: { startTime: 6.0, endTime: 10.3, peakTime: 7.5, description: "Hard braking ahead" },
   },
   jaywalker: {
     label: "Jaywalker",
     description: "Pedestrian darts from parked cars",
     severity: "critical",
-    incident: { startTime: 4.0, endTime: 7.0, peakTime: 5.0, description: "Pedestrian in roadway" },
+    incident: { startTime: 4.0, endTime: 8.0, peakTime: 5.0, description: "Pedestrian in roadway" },
   },
   red_light_runner: {
     label: "Red Light Runner",
-    description: "Cross-traffic runs intersection",
+    description: "Pedestrian sprints across intersection against light",
     severity: "critical",
-    incident: { startTime: 4.5, endTime: 7.0, peakTime: 5.5, description: "Vehicle running red light" },
+    incident: { startTime: 4.5, endTime: 8.2, peakTime: 5.5, description: "Pedestrian running red light" },
   },
   swerving_vehicle: {
     label: "Swerving Vehicle",
@@ -525,11 +876,24 @@ export const SCENARIO_INFO: Record<MockScenario, ScenarioMeta> = {
     severity: "warning",
     incident: { startTime: 2.0, endTime: 16.0, peakTime: 6.0, description: "Erratic lane changes" },
   },
+  final_model: {
+    label: "Final Model",
+    description: "Trained agent — optimal actions across all incidents",
+    severity: "critical",
+    incident: { startTime: 1.0, endTime: 14.0, peakTime: 6.5, description: "Multi-incident gauntlet" },
+  },
 };
 
-export const ALL_SCENARIOS: MockScenario[] = [
-  "normal", "near_miss", "rear_end", "jaywalker", "red_light_runner", "swerving_vehicle",
+/** Ordered list of all built-in scenario IDs */
+export const ALL_SCENARIOS: ScenarioId[] = [
+  "normal", "near_miss", "rear_end", "jaywalker", "red_light_runner", "swerving_vehicle", "final_model",
 ];
+
+/** Structured scenario definitions for extensibility (sub-scenarios, dashboard reuse) */
+export const SCENARIO_DEFINITIONS = ALL_SCENARIOS.map((id) => ({
+  id,
+  meta: SCENARIO_INFO[id],
+}));
 
 // ── Static world geometry (buildings, curbs, poles, etc.) ─────────
 // These are world-fixed objects that the LiDAR ray-tracer will hit,
@@ -633,84 +997,143 @@ function getWorldScenery(): WorldObject[] {
 
 interface EgoPose { x: number; y: number; yaw: number; }
 
-function getEgoTrajectory(scenario: MockScenario): (t: number) => EgoPose {
+/** Build a brake→dwell→resume trajectory for scenarios where ego stops. */
+function makeBrakeResumeTrajectory(
+  brakeStart: number, decel: number, dwellDuration: number, resumeAccel: number,
+): (t: number) => EgoPose {
+  const stopTime = EGO_SPEED / decel;
+  const brakeDist = EGO_SPEED * stopTime - 0.5 * decel * stopTime * stopTime;
+  const stopT = brakeStart + stopTime;
+  const resumeStartT = stopT + dwellDuration;
+  const resumeTime = EGO_SPEED / resumeAccel;
+  const resumeEndT = resumeStartT + resumeTime;
+  const stopX = brakeStart * EGO_SPEED + brakeDist;
+  const resumeDist = 0.5 * resumeAccel * resumeTime * resumeTime;
+
+  return (t) => {
+    if (t <= brakeStart) {
+      return { x: t * EGO_SPEED, y: 0, yaw: 0 };
+    }
+    if (t <= stopT) {
+      const dt = t - brakeStart;
+      const dist = EGO_SPEED * dt - 0.5 * decel * dt * dt;
+      return { x: brakeStart * EGO_SPEED + Math.max(0, dist), y: 0, yaw: 0 };
+    }
+    if (t <= resumeStartT) {
+      return { x: stopX, y: 0, yaw: 0 };
+    }
+    if (t <= resumeEndT) {
+      const dt = t - resumeStartT;
+      return { x: stopX + 0.5 * resumeAccel * dt * dt, y: 0, yaw: 0 };
+    }
+    const dt = t - resumeEndT;
+    return { x: stopX + resumeDist + dt * EGO_SPEED, y: 0, yaw: 0 };
+  };
+}
+
+/** Build a swerve trajectory — ego swerves left or right while mildly braking. */
+function makeSwerveTrajectory(
+  reactStart: number,
+  direction: "left" | "right",
+  magnitude: number,
+  brakeDecel: number = 3.0,
+): (t: number) => EgoPose {
+  const reactDuration = 2.5;
+  const reactEnd = reactStart + reactDuration;
+  const sign = direction === "left" ? 1 : -1;
+
+  return (t) => {
+    if (t <= reactStart) {
+      return { x: t * EGO_SPEED, y: 0, yaw: 0 };
+    }
+    if (t < reactEnd) {
+      const dt = t - reactStart;
+      const p = dt / reactDuration;
+      const sp = smoothstep(p);
+      // Mild braking during swerve
+      const speed = EGO_SPEED - brakeDecel * dt;
+      const effectiveSpeed = Math.max(speed, EGO_SPEED * 0.5);
+      const x = reactStart * EGO_SPEED + dt * effectiveSpeed;
+      // Swerve: sinusoidal lateral offset
+      const y = Math.sin(sp * Math.PI) * magnitude * sign;
+      const yaw = Math.cos(sp * Math.PI) * 0.12 * sign;
+      return { x, y, yaw };
+    }
+    // After swerve: resume straight at reduced speed then recover
+    const reactDist = reactDuration * Math.max(EGO_SPEED - brakeDecel * reactDuration, EGO_SPEED * 0.5);
+    const dt = t - reactEnd;
+    const recoverySpeed = lerp(EGO_SPEED * 0.7, EGO_SPEED, Math.min(1, dt / 3));
+    const x = reactStart * EGO_SPEED + reactDist + dt * recoverySpeed;
+    return { x, y: 0, yaw: 0 };
+  };
+}
+
+function getEgoTrajectory(scenario: ScenarioId, variant: SceneVariant = "ground_truth"): (t: number) => EgoPose {
+  // For normal scenario, all variants are identical
+  if (scenario === "normal") {
+    return (t) => ({ x: t * EGO_SPEED, y: 0, yaw: 0 });
+  }
+
+  // Variant-specific trajectories
+  if (variant !== "ground_truth") {
+    const reactTimes: Record<string, number> = {
+      normal: 0, near_miss: 5.5, rear_end: 6.0, jaywalker: 4.0,
+      red_light_runner: 4.5, swerving_vehicle: 3.0, final_model: 0,
+    };
+    const rt = reactTimes[scenario] ?? 0;
+
+    switch (variant) {
+      case "avoid_left":
+        return makeSwerveTrajectory(rt, "left", 1.8, 3.0);
+      case "avoid_right":
+        return makeSwerveTrajectory(rt, "right", 1.8, 3.0);
+      case "emergency_brake":
+        // Hard braking — higher decel than ground truth, earlier reaction
+        return makeBrakeResumeTrajectory(rt, 8.5, 2.0, 2.5);
+    }
+  }
+
+  // Ground truth — worst outcome (no evasion / minimal reaction)
   switch (scenario) {
-    case "rear_end": {
-      // Ego approaches car ahead, brakes hard at ~6.5s, comes to near-stop
-      const brakeStart = 6.5;
-      const decel = 6.0; // m/s²
+    case "near_miss":
+      // No swerve, no braking — drives straight into danger
+      return (t) => ({ x: t * EGO_SPEED, y: 0, yaw: 0 });
+
+    case "rear_end":
+      // No braking — drives straight at full speed (pretrained, no intervention)
+      return (t) => ({ x: t * EGO_SPEED, y: 0, yaw: 0 });
+
+    case "jaywalker":
+      // No reaction — drives straight through
+      return (t) => ({ x: t * EGO_SPEED, y: 0, yaw: 0 });
+
+    case "red_light_runner":
+      // No braking — enters intersection at full speed
+      return (t) => ({ x: t * EGO_SPEED, y: 0, yaw: 0 });
+
+    case "swerving_vehicle":
+      // Maintains full speed, no evasion
+      return (t) => ({ x: t * EGO_SPEED, y: 0, yaw: 0 });
+
+    case "final_model": {
+      // Chained optimal trajectory: swerve, brake, swerve, brake, brake
+      // Build sub-trajectories and evaluate the active one at each time t
+      const swerveR = makeSwerveTrajectory(1.0, "right", 1.8, 3.0);   // near miss
+      const brake1 = makeBrakeResumeTrajectory(3.5, 8.5, 0.8, 3.5);   // rear end
+      const swerveL = makeSwerveTrajectory(6.5, "left", 1.8, 3.0);    // jaywalker
+      const brake2 = makeBrakeResumeTrajectory(9.0, 8.5, 0.8, 3.5);   // red light
+      const brake3 = makeBrakeResumeTrajectory(11.5, 8.5, 0.8, 3.5);  // swerving vehicle
+
       return (t) => {
-        if (t <= brakeStart) {
-          return { x: t * EGO_SPEED, y: 0, yaw: 0 };
-        }
-        const dt = t - brakeStart;
-        const dist = EGO_SPEED * dt - 0.5 * decel * dt * dt;
-        return { x: brakeStart * EGO_SPEED + Math.max(0, dist), y: 0, yaw: 0 };
+        if (t < 1.0) return { x: t * EGO_SPEED, y: 0, yaw: 0 };
+        if (t < 3.5) return swerveR(t);
+        if (t < 6.5) return brake1(t);
+        if (t < 9.0) return swerveL(t);
+        if (t < 11.5) return brake2(t);
+        return brake3(t);
       };
     }
-    case "jaywalker": {
-      // Ego sees pedestrian, emergency brakes at ~4.5s
-      const brakeStart = 4.5;
-      const decel = 7.5; // hard emergency braking
-      return (t) => {
-        if (t <= brakeStart) return { x: t * EGO_SPEED, y: 0, yaw: 0 };
-        const dt = t - brakeStart;
-        const dist = EGO_SPEED * dt - 0.5 * decel * dt * dt;
-        return { x: brakeStart * EGO_SPEED + Math.max(0, dist), y: 0, yaw: 0 };
-      };
-    }
-    case "near_miss": {
-      // Ego brakes slightly and swerves right to avoid
-      const reactStart = 5.5;
-      const reactEnd = 8.0;
-      return (t) => {
-        let speed = EGO_SPEED;
-        let y = 0;
-        let yaw = 0;
-        if (t > reactStart && t < reactEnd) {
-          const p = (t - reactStart) / (reactEnd - reactStart);
-          // Brake slightly
-          speed = EGO_SPEED * lerp(1, 0.7, smoothstep(p < 0.5 ? p * 2 : 2 - p * 2));
-          // Swerve right
-          const swerve = Math.sin(p * Math.PI) * -1.2;
-          y = swerve;
-          yaw = Math.cos(p * Math.PI) * 0.08;
-        }
-        // Integrate position (approximate)
-        let x: number;
-        if (t <= reactStart) {
-          x = t * EGO_SPEED;
-        } else if (t < reactEnd) {
-          const dt = t - reactStart;
-          x = reactStart * EGO_SPEED + dt * speed;
-        } else {
-          // After reaction, resume
-          const reactDist = (reactEnd - reactStart) * EGO_SPEED * 0.85;
-          x = reactStart * EGO_SPEED + reactDist + (t - reactEnd) * EGO_SPEED;
-        }
-        return { x, y, yaw };
-      };
-    }
-    case "red_light_runner": {
-      // Ego brakes hard when cross-traffic appears
-      const brakeStart = 5.0;
-      const decel = 6.5;
-      return (t) => {
-        if (t <= brakeStart) return { x: t * EGO_SPEED, y: 0, yaw: 0 };
-        const dt = t - brakeStart;
-        const dist = EGO_SPEED * dt - 0.5 * decel * dt * dt;
-        return { x: brakeStart * EGO_SPEED + Math.max(0, dist), y: 0, yaw: 0 };
-      };
-    }
-    case "swerving_vehicle": {
-      // Ego brakes slightly and gives space
-      return (t) => {
-        const speed = t > 3 ? EGO_SPEED * 0.85 : EGO_SPEED;
-        const x = t <= 3 ? t * EGO_SPEED : 3 * EGO_SPEED + (t - 3) * speed;
-        return { x, y: 0, yaw: 0 };
-      };
-    }
-    case "normal":
+
     default:
       return (t) => ({ x: t * EGO_SPEED, y: 0, yaw: 0 });
   }
@@ -720,19 +1143,22 @@ function getEgoTrajectory(scenario: MockScenario): (t: number) => EgoPose {
 
 const sceneCache = new Map<string, SceneData>();
 
-export function generateSceneData(scenario: MockScenario = "normal"): SceneData {
-  const cached = sceneCache.get(scenario);
+export function generateSceneData(scenario: ScenarioId = "normal", variant: SceneVariant = "ground_truth"): SceneData {
+  const cacheId = `${scenario}__${variant}`;
+  const cached = sceneCache.get(cacheId);
   if (cached) return cached;
 
   const baseActors = makeBaseTraffic();
   const incidentActors = makeIncidentActors(scenario);
   const allActors = [...baseActors, ...incidentActors];
   const worldScenery = getWorldScenery();
-  const egoTraj = getEgoTrajectory(scenario);
-  const totalSeconds = NUM_FRAMES / FPS;
+  const egoTraj = getEgoTrajectory(scenario, variant);
+  // Final model is 15 seconds (150 frames), others are default
+  const numFrames = scenario === "final_model" ? 150 : NUM_FRAMES;
+  const totalSeconds = numFrames / FPS;
   const frames: FrameData[] = [];
 
-  for (let fi = 0; fi < NUM_FRAMES; fi++) {
+  for (let fi = 0; fi < numFrames; fi++) {
     const t = fi / FPS;
 
     // Ego position from scenario-aware trajectory
@@ -794,8 +1220,8 @@ export function generateSceneData(scenario: MockScenario = "normal"): SceneData 
     });
   }
 
-  const data: SceneData = { frames, fps: FPS, totalSeconds, totalFrames: NUM_FRAMES };
-  sceneCache.set(scenario, data);
+  const data: SceneData = { frames, fps: FPS, totalSeconds, totalFrames: numFrames };
+  sceneCache.set(cacheId, data);
   return data;
 }
 

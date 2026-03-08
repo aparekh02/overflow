@@ -11,7 +11,7 @@ import { useState, useEffect, useRef, useCallback, useSyncExternalStore } from "
 import { useStore } from "../store";
 import { colors, fonts } from "../theme";
 import { SCENARIO_INFO } from "../mockData";
-import type { MockScenario } from "../mockData";
+import type { ScenarioId } from "../mockData";
 import {
   getTicketLog,
   clearTicketLog,
@@ -510,7 +510,7 @@ function AgentsTab() {
         fontFamily: fonts.mono, fontSize: 10, color: colors.textDim,
         overflowX: "auto",
       }}>
-        <FlowStep label="Raw Data" sub="Parquet / Mock" />
+        <FlowStep label="Raw Data" sub="Parquet / Scenario" />
         <FlowArrow />
         <FlowStep label="Parse & Decode" sub="Hyparquet" />
         <FlowArrow />

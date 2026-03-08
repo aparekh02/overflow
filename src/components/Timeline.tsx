@@ -22,7 +22,7 @@ export default function Timeline() {
   const setPlaybackSpeed = useStore((s) => s.actions.setPlaybackSpeed);
   const fps = useStore((s) => s.sceneData?.fps ?? 10);
   const dataSource = useStore((s) => s.dataSource);
-  const mockScenario = useStore((s) => s.mockScenario);
+  const scenarioId = useStore((s) => s.scenarioId);
   const totalSeconds = (totalFrames - 1) / fps;
 
   const customIncident = useStore((s) => s.customIncident);
@@ -30,9 +30,9 @@ export default function Timeline() {
   const customScenarioName = useStore((s) => s.customScenarioName);
 
   // Get incident window if mock scenario
-  const isMock = dataSource === "mock";
-  const scenarioMeta = isMock ? SCENARIO_INFO[mockScenario] : null;
-  const incident: IncidentWindow | null = (isMock ? (customIncident ?? scenarioMeta?.incident) : null) ?? null;
+  const isScenario = dataSource === "scenario";
+  const scenarioMeta = isScenario ? SCENARIO_INFO[scenarioId] : null;
+  const incident: IncidentWindow | null = (isScenario ? (customIncident ?? scenarioMeta?.incident) : null) ?? null;
   const effectiveSeverity = customSeverity ?? scenarioMeta?.severity ?? "none";
   const effectiveLabel = customScenarioName ?? scenarioMeta?.label ?? "";
 

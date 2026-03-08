@@ -249,14 +249,14 @@ export default function TicketConsole() {
 
   // Scenario ticket
   const dataSource = useStore((s) => s.dataSource);
-  const mockScenario = useStore((s) => s.mockScenario);
+  const scenarioId = useStore((s) => s.scenarioId);
   const customScenarioName = useStore((s) => s.customScenarioName);
   const customSeverity = useStore((s) => s.customSeverity);
   const customIncident = useStore((s) => s.customIncident);
 
   const scenarioTicket: Ticket | null = (() => {
-    if (dataSource !== "mock") return null;
-    const meta = SCENARIO_INFO[mockScenario];
+    if (dataSource !== "scenario") return null;
+    const meta = SCENARIO_INFO[scenarioId];
     const name = customScenarioName ?? meta.label;
     const sev = customSeverity ?? meta.severity;
     const incident = customIncident ?? meta.incident;

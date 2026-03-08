@@ -19,6 +19,8 @@ import BoundingBoxes from "./BoundingBoxes";
 import EgoVehicle from "./EgoVehicle";
 import { useStore } from "../store";
 import { colors } from "../theme";
+import type { FrameData } from "../mockData";
+import { FrameOverrideContext } from "./FrameOverrideContext";
 
 // ---------------------------------------------------------------------------
 // Scene offset type — used by counterfactual tiles in the dashboard
@@ -115,15 +117,17 @@ function SceneContent({
   offset,
   trail,
   trailColor,
+  frameOverride,
 }: {
   offset: SceneOffset | null;
   trail: [number, number, number][] | null;
   trailColor: string;
+  frameOverride: FrameData | null;
 }) {
   const showGrid = useStore((s) => s.showGrid);
 
   return (
-    <>
+    <FrameOverrideContext.Provider value={frameOverride}>
       <ambientLight intensity={0.35} />
       <directionalLight position={[50, -30, 80]} intensity={0.9} />
       <directionalLight position={[-30, 40, 20]} intensity={0.35} />
@@ -167,7 +171,7 @@ function SceneContent({
           labelColor="white"
         />
       </GizmoHelper>
-    </>
+    </FrameOverrideContext.Provider>
   );
 }
 
@@ -179,10 +183,12 @@ export default function Scene3D({
   offset,
   trail,
   trailColor = "#00e89d",
+  frameOverride,
 }: {
   offset?: SceneOffset;
   trail?: [number, number, number][];
   trailColor?: string;
+  frameOverride?: FrameData | null;
 }) {
   return (
     <div style={{ position: "absolute", inset: 0 }}>
@@ -204,6 +210,7 @@ export default function Scene3D({
           offset={offset ?? null}
           trail={trail ?? null}
           trailColor={trailColor}
+          frameOverride={frameOverride ?? null}
         />
       </Canvas>
     </div>

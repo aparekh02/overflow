@@ -6,7 +6,10 @@
       "Bash(npx vite:*)",
       "Bash(node:*)",
       "Bash(npx:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(du -sh /Users/kuant/hackathons/overflow/public/waymo_data/* 2>/dev/null | head -20)",
+      "Bash(find /Users/kuant/hackathons/overflow -maxdepth 2 -type f \\\\\\( -name \"README*\" -o -name \"*.md\" \\\\\\) 2>/dev/null | grep -v node_modules)",
+      "Bash(pkill -f \"node.*vite\" && pkill -f \"npm.*vite\" && pkill -f \"npm run dev\" && pkill -f \"esbuild.*overflow\")"
     ]
   }
 }

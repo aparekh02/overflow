@@ -1,12 +1,15 @@
 /**
  * DataBrowser — A sidebar drawer to browse & switch between Waymo segments
- * and mock scenarios. Triggered by a floating tab on the left edge.
+ * and scenarios. Triggered by a floating tab on the left edge.
  */
 
 import { useState, useEffect, useCallback } from "react";
 import { useStore } from "../store";
 import { colors, fonts } from "../theme";
 import { ALL_SCENARIOS, SCENARIO_INFO } from "../mockData";
+import type { ScenarioId } from "../mockData";
+import { generateTrajectoryMoments } from "../utils/trajectoryData";
+import { loadScenario } from "../utils/scenarioLoader";
 
 // ---------------------------------------------------------------------------
 // Segment manifest
@@ -54,7 +57,7 @@ export default function DataBrowser() {
   const [loading, setLoading] = useState(false);
   const dataSource = useStore((s) => s.dataSource);
   const waymoSegment = useStore((s) => s.waymoSegment);
-  const mockScenario = useStore((s) => s.mockScenario);
+  const scenarioId = useStore((s) => s.scenarioId);
   const actions = useStore((s) => s.actions);
 
   // Fetch available segments on mount
@@ -74,10 +77,15 @@ export default function DataBrowser() {
     setTimeout(() => setLoading(false), 500);
   }, [actions]);
 
-  const loadMock = useCallback((scenario: string) => {
-    actions.reset();
-    actions.setMockScenario(scenario as any);
-    actions.setDataSource("mock");
+  const switchScenario = useCallback((scenario: string) => {
+    loadScenario(scenario as ScenarioId).then((sceneData) => {
+      actions.setScenarioId(scenario as ScenarioId);
+      actions.setDataSource("scenario");
+      actions.setSceneData(sceneData);
+      actions.setCustomIncident(null);
+      const moments = generateTrajectoryMoments(sceneData);
+      actions.setTrajectoryMoments(moments);
+    });
   }, [actions]);
 
   const isWaymo = dataSource === "waymo" || dataSource === "waymo-drop";
@@ -135,7 +143,7 @@ export default function DataBrowser() {
             fontSize: 10, fontWeight: 700, color: colors.textDim,
             fontFamily: fonts.mono, letterSpacing: "1.2px", textTransform: "uppercase",
           }}>
-            📂 DATASETS
+            DATASETS
           </span>
           <button onClick={() => setOpen(false)} style={{
             background: "none", border: "none", color: colors.textDim, fontSize: 14,
@@ -152,8 +160,68 @@ export default function DataBrowser() {
         {/* Scrollable content */}
         <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
 
+          {/* ── Scenarios ── */}
+          <SectionHeader title="SCENARIOS" />
+
+          {ALL_SCENARIOS.map((sc) => {
+            const info = SCENARIO_INFO[sc];
+            const active = dataSource === "scenario" && scenarioId === sc;
+            const sevColor = info.severity === "critical" ? "#FF4444"
+              : info.severity === "warning" ? "#FFB020" : colors.accent;
+            return (
+              <button
+                key={sc}
+                onClick={() => switchScenario(sc)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 8,
+                  width: "100%", textAlign: "left",
+                  padding: "7px 14px", cursor: "pointer",
+                  border: "none", borderRadius: 0,
+                  background: active ? "rgba(0,232,157,0.08)" : "transparent",
+                  borderLeft: active ? `2px solid ${sevColor}` : "2px solid transparent",
+                  transition: "all 0.12s",
+                }}
+                onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
+                onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
+              >
+                <span style={{
+                  width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
+                  background: active ? sevColor : colors.textDim,
+                  boxShadow: active ? `0 0 6px ${sevColor}` : "none",
+                }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: active ? 600 : 400,
+                    color: active ? colors.textPrimary : colors.textSecondary,
+                    fontFamily: fonts.sans,
+                  }}>
+                    {info.label}
+                  </div>
+                  {info.incident && (
+                    <div style={{
+                      fontSize: 8, color: colors.textDim, fontFamily: fonts.mono, marginTop: 1,
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    }}>
+                      {info.incident.description}
+                    </div>
+                  )}
+                </div>
+                {info.severity !== "none" && (
+                  <span style={{
+                    fontSize: 7, fontFamily: fonts.mono, fontWeight: 700,
+                    color: sevColor, textTransform: "uppercase", letterSpacing: "0.5px", flexShrink: 0,
+                  }}>
+                    {info.severity}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+
+          <Divider />
+
           {/* ── Waymo segments ── */}
-          <SectionHeader title="WAYMO SEGMENTS" />
+          <SectionHeader title="FULL DRIVING (WAYMO)" />
 
           {segments.length === 0 && (
             <div style={{ padding: "8px 14px", fontSize: 9, color: colors.textDim, fontFamily: fonts.mono }}>
@@ -216,66 +284,6 @@ export default function DataBrowser() {
 
           <Divider />
 
-          {/* ── Mock scenarios ── */}
-          <SectionHeader title="MOCK SCENARIOS" />
-
-          {ALL_SCENARIOS.map((sc) => {
-            const info = SCENARIO_INFO[sc];
-            const active = dataSource === "mock" && mockScenario === sc;
-            const sevColor = info.severity === "critical" ? "#FF4444"
-              : info.severity === "warning" ? "#FFB020" : colors.accent;
-            return (
-              <button
-                key={sc}
-                onClick={() => loadMock(sc)}
-                style={{
-                  display: "flex", alignItems: "center", gap: 8,
-                  width: "100%", textAlign: "left",
-                  padding: "7px 14px", cursor: "pointer",
-                  border: "none", borderRadius: 0,
-                  background: active ? "rgba(0,232,157,0.08)" : "transparent",
-                  borderLeft: active ? `2px solid ${sevColor}` : "2px solid transparent",
-                  transition: "all 0.12s",
-                }}
-                onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
-                onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
-              >
-                <span style={{
-                  width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
-                  background: active ? sevColor : colors.textDim,
-                  boxShadow: active ? `0 0 6px ${sevColor}` : "none",
-                }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{
-                    fontSize: 10, fontWeight: active ? 600 : 400,
-                    color: active ? colors.textPrimary : colors.textSecondary,
-                    fontFamily: fonts.sans,
-                  }}>
-                    {info.label}
-                  </div>
-                  {info.incident && (
-                    <div style={{
-                      fontSize: 8, color: colors.textDim, fontFamily: fonts.mono, marginTop: 1,
-                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                    }}>
-                      {info.incident.description}
-                    </div>
-                  )}
-                </div>
-                {info.severity !== "none" && (
-                  <span style={{
-                    fontSize: 7, fontFamily: fonts.mono, fontWeight: 700,
-                    color: sevColor, textTransform: "uppercase", letterSpacing: "0.5px", flexShrink: 0,
-                  }}>
-                    {info.severity}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-
-          <Divider />
-
           {/* ── Drag & Drop hint ── */}
           <div style={{ padding: "12px 14px" }}>
             <div style={{
@@ -284,7 +292,6 @@ export default function DataBrowser() {
               padding: "10px 12px",
               textAlign: "center",
             }}>
-              <div style={{ fontSize: 18, opacity: 0.4, marginBottom: 4 }}>📂</div>
               <div style={{ fontSize: 9, color: colors.textDim, fontFamily: fonts.mono, lineHeight: 1.5 }}>
                 Drag & drop Waymo parquet files onto the canvas to load a custom segment
               </div>

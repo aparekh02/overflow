@@ -57,7 +57,7 @@ function readMainStoreState(): Partial<MainSimState> {
   const store = useStore.getState();
   const frame = store.currentFrame;
   const frameIndex = store.currentFrameIndex;
-  const scenario = store.mockScenario;
+  const scenario = store.scenarioId;
 
   if (!frame) return { frameIndex, scenarioId: scenario };
 

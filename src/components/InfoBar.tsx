@@ -12,13 +12,13 @@ export default function InfoBar() {
   const currentFrameIndex = useStore((s) => s.currentFrameIndex);
   const currentFrame = useStore((s) => s.currentFrame);
   const dataSource = useStore((s) => s.dataSource);
-  const mockScenario = useStore((s) => s.mockScenario);
+  const scenarioId = useStore((s) => s.scenarioId);
   const pts = currentFrame?.pointCount ?? 0;
   const boxes = currentFrame?.boxes.length ?? 0;
   const customScenarioName = useStore((s) => s.customScenarioName);
   const customSeverity = useStore((s) => s.customSeverity);
-  const isMock = dataSource === "mock";
-  const scenarioInfo = isMock ? SCENARIO_INFO[mockScenario] : null;
+  const isScenario = dataSource === "scenario";
+  const scenarioInfo = isScenario ? SCENARIO_INFO[scenarioId] : null;
   const displayLabel = customScenarioName ?? scenarioInfo?.label ?? "";
   const displaySeverity = customSeverity ?? scenarioInfo?.severity ?? "none";
 
@@ -59,9 +59,9 @@ export default function InfoBar() {
           marginLeft: 2,
           letterSpacing: "0.3px",
         }}>
-          {isMock ? "Mock" : "Waymo OD v2"}
+          {isScenario ? scenarioInfo?.label ?? "Scenario" : "Waymo OD v2"}
         </span>
-        {isMock && displaySeverity !== "none" && (
+        {isScenario && displaySeverity !== "none" && (
           <span style={{
             fontSize: 9, fontWeight: 700,
             color: displaySeverity === "critical" ? "#FF4444" : "#FFB020",

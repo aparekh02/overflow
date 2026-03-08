@@ -4,12 +4,13 @@
  * In "model" mode, renders GLB models via ModelInstances.
  */
 
-import { useRef, useMemo, Suspense } from "react";
+import { useRef, useMemo, useContext, Suspense } from "react";
 import * as THREE from "three";
 import { useFrame } from "@react-three/fiber";
 import { useStore } from "../store";
 import { BOX_TYPE_COLORS } from "../mockData";
 import type { ActorType, BBox3D, FrameData } from "../mockData";
+import { FrameOverrideContext } from "./FrameOverrideContext";
 import {
   VehicleModel,
   PedestrianModel,
@@ -61,13 +62,17 @@ function WireframeBoxes() {
   const edgeColors = useMemo(() => new Float32Array(MAX_EDGE_VERTS * 3), []);
   const fillColors = useMemo(() => new Float32Array(MAX_INSTANCES * 3), []);
 
+  const frameOverride = useContext(FrameOverrideContext);
+  const overrideRef = useRef(frameOverride);
+  overrideRef.current = frameOverride;
+
   useFrame(() => {
     const fillMesh = meshRef.current;
     const edgeGeo = edgeGeoRef.current;
     if (!fillMesh || !edgeGeo) return;
 
     const state = useStore.getState();
-    const currentFrame = state.currentFrame;
+    const currentFrame = overrideRef.current ?? state.currentFrame;
     const boxMode = state.boxMode;
 
     if (currentFrame === lastFrameRef.current && boxMode === lastModeRef.current) return;
@@ -178,8 +183,10 @@ function ModelForType({ box }: { box: BBox3D }) {
 }
 
 function ModelInstances() {
-  const currentFrame = useStore((s) => s.currentFrame);
+  const storeFrame = useStore((s) => s.currentFrame);
   const boxMode = useStore((s) => s.boxMode);
+  const frameOverride = useContext(FrameOverrideContext);
+  const currentFrame = frameOverride ?? storeFrame;
 
   if (boxMode !== "model" || !currentFrame) return null;
 

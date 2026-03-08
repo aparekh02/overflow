@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Pre-generated scenario files (large binaries, regenerate with: npm run generate-scenarios)
+public/scenarios/
+
 # Waymo data (large parquet files)
 public/waymo_data/**/*.parquet
 public/waymo_data/manifest.json

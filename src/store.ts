@@ -1,21 +1,21 @@
 /**
- * Global state store — Zustand-based, supporting both mock and real Waymo data.
+ * Global state store — Zustand-based, supporting both scenario and real Waymo data.
  */
 
 import { create } from "zustand";
-import type { FrameData, SceneData, MockScenario, IncidentWindow } from "./mockData";
+import type { FrameData, SceneData, ScenarioId, IncidentWindow } from "./mockData";
 import type { TrajectoryMoment, PlannerPolicy, ObserverPolicy } from "./utils/trajectoryData";
 
 export type ColormapMode = "intensity" | "range" | "elongation";
 export type BoxDisplayMode = "off" | "box" | "model";
-export type DataSource = "mock" | "waymo" | "waymo-drop";
+export type DataSource = "scenario" | "waymo" | "waymo-drop";
 export type LoadStatus = "idle" | "loading" | "ready" | "error";
 
 interface StoreState {
   // Data
   sceneData: SceneData | null;
   dataSource: DataSource;
-  mockScenario: MockScenario;
+  scenarioId: ScenarioId;
   waymoSegment: string | null; // active segment name
   loadStatus: LoadStatus;
   loadMessage: string;
@@ -65,7 +65,7 @@ interface StoreState {
     setPointOpacity: (v: number) => void;
     toggleGrid: () => void;
     setDataSource: (source: DataSource) => void;
-    setMockScenario: (scenario: MockScenario) => void;
+    setScenarioId: (scenario: ScenarioId) => void;
     setWaymoSegment: (seg: string | null) => void;
     setLoadStatus: (status: LoadStatus) => void;
     setLoadMessage: (msg: string) => void;
@@ -88,8 +88,8 @@ interface StoreState {
 
 export const useStore = create<StoreState>((set, get) => ({
   sceneData: null,
-  dataSource: "waymo",
-  mockScenario: "normal",
+  dataSource: "scenario",
+  scenarioId: "normal",
   waymoSegment: null,
   customIncident: null,
   customScenarioName: null,
@@ -102,7 +102,7 @@ export const useStore = create<StoreState>((set, get) => ({
   isPlaying: false,
   playbackSpeed: 1,
   colormapMode: "intensity",
-  boxMode: "box",
+  boxMode: "model",
   pointOpacity: 0.85,
   showGrid: true,
   showTrajectories: true,
@@ -157,7 +157,7 @@ export const useStore = create<StoreState>((set, get) => ({
     setPointOpacity: (v) => set({ pointOpacity: v }),
     toggleGrid: () => set((s) => ({ showGrid: !s.showGrid })),
     setDataSource: (source) => set({ dataSource: source }),
-    setMockScenario: (scenario) => set({ mockScenario: scenario }),
+    setScenarioId: (scenario) => set({ scenarioId: scenario }),
     setWaymoSegment: (seg) => set({ waymoSegment: seg }),
     setLoadStatus: (status) => set({ loadStatus: status }),
     setLoadMessage: (msg) => set({ loadMessage: msg }),

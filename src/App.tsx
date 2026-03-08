@@ -12,7 +12,9 @@ import GraphPage from "./pages/GraphPage";
 import AnalyticsPage from "./pages/AnalyticsPage";
 import { useStore } from "./store";
 import type { DataSource } from "./store";
-import { generateSceneData } from "./mockData";
+import { ALL_SCENARIOS } from "./mockData";
+import type { ScenarioId } from "./mockData";
+import { loadScenario, preloadAllScenarios } from "./utils/scenarioLoader";
 import { generateTrajectoryMoments } from "./utils/trajectoryData";
 import {
   loadWaymoFromUrls,
@@ -20,6 +22,7 @@ import {
   scanDroppedFiles,
   type WaymoLoadResult,
 } from "./utils/waymoLoader";
+import { getCachedScene, setCachedScene, cacheKey } from "./utils/sceneCache";
 import { colors, fonts, typeScale } from "./theme";
 
 // ---------------------------------------------------------------------------
@@ -51,13 +54,52 @@ async function detectWaymoLayout(
 }
 
 // ---------------------------------------------------------------------------
-// Data loading hook
+// Scenario pre-generation hook — eagerly generates all scenarios on mount
+// ---------------------------------------------------------------------------
+
+function useScenarioPreloader() {
+  const [ready, setReady] = useState(false);
+  const actions = useStore((s) => s.actions);
+
+  useEffect(() => {
+    const defaultScenario: ScenarioId = "normal";
+    actions.setLoadStatus("loading");
+    actions.setLoadMessage("Loading scenario…");
+
+    loadScenario(defaultScenario, "ground_truth", (msg, progress) => {
+      actions.setLoadMessage(msg);
+      actions.setLoadProgress(progress);
+    })
+      .then((sceneData) => {
+        actions.setScenarioId(defaultScenario);
+        actions.setDataSource("scenario");
+        actions.setSceneData(sceneData);
+        const moments = generateTrajectoryMoments(sceneData);
+        actions.setTrajectoryMoments(moments);
+        setReady(true);
+
+        // Pre-fetch remaining scenarios in background
+        const remaining = ALL_SCENARIOS.filter((s) => s !== defaultScenario);
+        preloadAllScenarios(remaining);
+      })
+      .catch((e) => {
+        console.error("[preloader] Failed to load scenario:", e);
+        actions.setLoadError(e instanceof Error ? e.message : String(e));
+        actions.setLoadStatus("error");
+      });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return ready;
+}
+
+// ---------------------------------------------------------------------------
+// Data loading hook (handles waymo loading; scenarios are pre-generated)
 // ---------------------------------------------------------------------------
 
 function useDataLoader() {
   const dataSource = useStore((s) => s.dataSource);
   const loadStatus = useStore((s) => s.loadStatus);
-  const mockScenario = useStore((s) => s.mockScenario);
+  const scenarioId = useStore((s) => s.scenarioId);
   const waymoSegment = useStore((s) => s.waymoSegment);
   const actions = useStore((s) => s.actions);
 
@@ -65,38 +107,60 @@ function useDataLoader() {
     if (loadStatus !== "idle") return;
     if (dataSource === "waymo-drop") return;
 
-    if (dataSource === "mock") {
+    if (dataSource === "scenario") {
       actions.setLoadStatus("loading");
-      actions.setLoadMessage(`Generating "${mockScenario}" scenario`);
-      actions.setLoadProgress(0.5);
-      setTimeout(() => {
-        try {
-          const sceneData = generateSceneData(mockScenario);
+      actions.setLoadMessage(`Loading "${scenarioId}" scenario`);
+      actions.setLoadProgress(0.1);
+
+      loadScenario(scenarioId, "ground_truth", (msg, progress) => {
+        actions.setLoadMessage(msg);
+        actions.setLoadProgress(progress);
+      })
+        .then((sceneData) => {
           actions.setSceneData(sceneData);
           const moments = generateTrajectoryMoments(sceneData);
           actions.setTrajectoryMoments(moments);
-        } catch (e) {
+        })
+        .catch((e) => {
           actions.setLoadError(e instanceof Error ? e.message : String(e));
           actions.setLoadStatus("error");
-        }
-      }, 0);
+        });
     } else if (dataSource === "waymo") {
       actions.setLoadStatus("loading");
-      actions.setLoadMessage("Detecting data layout");
+      actions.setLoadMessage("Checking cache…");
       actions.setLoadProgress(0);
 
-      detectWaymoLayout("/waymo_data", waymoSegment)
-        .then(({ basePath, segmentName }) => {
-          actions.setLoadMessage("Opening Parquet files");
-          return loadWaymoFromUrls(basePath, (step, progress) => {
-            actions.setLoadMessage(step);
-            actions.setLoadProgress(progress);
-          }, segmentName);
-        })
-        .then((data: WaymoLoadResult) => {
-          actions.setSceneData(data);
-          const moments = generateTrajectoryMoments(data);
-          actions.setTrajectoryMoments(moments);
+      const key = cacheKey("waymo", waymoSegment);
+
+      getCachedScene(key)
+        .then((cached) => {
+          if (cached) {
+            actions.setLoadMessage("Restoring from cache…");
+            actions.setLoadProgress(0.9);
+            actions.setSceneData(cached);
+            const moments = generateTrajectoryMoments(cached);
+            actions.setTrajectoryMoments(moments);
+            return;
+          }
+
+          actions.setLoadMessage("Detecting data layout");
+          actions.setLoadProgress(0);
+
+          return detectWaymoLayout("/waymo_data", waymoSegment)
+            .then(({ basePath, segmentName }) => {
+              actions.setLoadMessage("Opening Parquet files");
+              return loadWaymoFromUrls(basePath, (step, progress) => {
+                actions.setLoadMessage(step);
+                actions.setLoadProgress(progress);
+              }, segmentName);
+            })
+            .then((data: WaymoLoadResult) => {
+              actions.setSceneData(data);
+              const moments = generateTrajectoryMoments(data);
+              actions.setTrajectoryMoments(moments);
+              // Cache in background for next reload
+              setCachedScene(key, data).catch(() => {});
+            });
         })
         .catch((e) => {
           console.error("[loadWaymo] Error:", e);
@@ -104,7 +168,7 @@ function useDataLoader() {
           actions.setLoadStatus("error");
         });
     }
-  }, [dataSource, loadStatus, mockScenario, waymoSegment, actions]);
+  }, [dataSource, loadStatus, scenarioId, waymoSegment, actions]);
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +177,7 @@ function useDataLoader() {
 
 function LoadingScreen() {
   const loadMessage = useStore((s) => s.loadMessage);
-  const loadProgress = useStore((s) => s.loadProgress);
+  const displayProgress = useStore((s) => s.loadProgress);
 
   return (
     <div style={{
@@ -136,7 +200,7 @@ function LoadingScreen() {
       }}>
         <div style={{
           height: "100%",
-          width: `${Math.round(loadProgress * 100)}%`,
+          width: `${Math.round(displayProgress * 100)}%`,
           background: colors.accent,
           borderRadius: 2, transition: "width 0.3s ease-out",
         }} />
@@ -171,8 +235,8 @@ function ErrorScreen() {
         <button onClick={() => { actions.reset(); actions.setDataSource("waymo"); }} style={btnStyle(true)}>
           Retry Waymo
         </button>
-        <button onClick={() => { actions.reset(); actions.setDataSource("mock"); }} style={btnStyle(false)}>
-          Use Mock
+        <button onClick={() => { actions.reset(); actions.setDataSource("scenario"); }} style={btnStyle(false)}>
+          Use Scenarios
         </button>
       </div>
     </div>
@@ -219,6 +283,8 @@ function useDropZone() {
       const moments = generateTrajectoryMoments(data);
       actions.setTrajectoryMoments(moments);
       toast.success("Waymo data loaded successfully");
+      // Cache dropped data for next reload
+      setCachedScene(cacheKey("waymo-drop"), data).catch(() => {});
     } catch (err) {
       actions.setLoadError(err instanceof Error ? err.message : String(err));
       actions.setLoadStatus("error");
@@ -247,11 +313,14 @@ function useDropZone() {
 // ---------------------------------------------------------------------------
 
 export default function App() {
+  const ready = useScenarioPreloader();
   useDataLoader();
   const dragging = useDropZone();
   const loadStatus = useStore((s) => s.loadStatus);
   const sceneData = useStore((s) => s.sceneData);
 
+  // Show loading during initial generation
+  if (!ready && !sceneData) return <LoadingScreen />;
   if (loadStatus === "loading" || (!sceneData && loadStatus === "idle")) return <LoadingScreen />;
   if (loadStatus === "error") return <ErrorScreen />;
 

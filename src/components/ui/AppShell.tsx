@@ -165,7 +165,7 @@ function OpenEnvStatus() {
         ...typeScale.caption,
         color: colors.textSecondary,
       }}>
-        OpenEnv Mock
+        OpenEnv
       </span>
     </div>
   );
