@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-apex-agents-env"
+version = "0.1.0"
+description = "APEX-Agents Environment for OpenEnv — professional task evaluation across Law, Investment Banking, and Management Consulting"
+requires-python = ">=3.10"
+dependencies = [
+    "openenv-core[core]>=0.2.1",
+    "fastapi>=0.115.0",
+    "pydantic>=2.0.0",
+    "uvicorn[standard]>=0.24.0",
+    "requests>=2.31.0",
+    "datasets>=2.14.0",
+    "openai>=1.0.0",
+    "tiktoken>=0.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+server = "apex_agents_env.server.app:main"
+
+[tool.setuptools]
+packages = ["apex_agents_env", "apex_agents_env.server"]
+package-dir = { "apex_agents_env" = ".", "apex_agents_env.server" = "server" }
