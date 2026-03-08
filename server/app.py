@@ -496,13 +496,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #08080f; color: #ddd; font-family: 'Courier New', monospace; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 
-header { background: #101018; border-bottom: 1px solid #252535; padding: 8px 18px; display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
-header h1 { font-size: 13px; color: #7eb8ff; letter-spacing: 3px; }
-.badge { padding: 2px 9px; border-radius: 10px; font-size: 10px; font-weight: bold; }
+header { background: #101018; border-bottom: 1px solid #252535; padding: 10px 20px; display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+header h1 { font-size: 16px; color: #7eb8ff; letter-spacing: 3px; }
+.badge { padding: 3px 12px; border-radius: 10px; font-size: 13px; font-weight: bold; }
 .badge-ok  { background:#0e2a0e; color:#4caf50; border:1px solid #4caf50; }
 .badge-err { background:#2a0e0e; color:#f44336; border:1px solid #f44336; }
-.mode-row { margin-left:auto; display:flex; gap:6px; align-items:center; }
-.mbtn { padding:3px 12px; border-radius:7px; border:1px solid #333; background:#151522; color:#888; cursor:pointer; font-size:11px; }
+.mode-row { margin-left:auto; display:flex; gap:8px; align-items:center; }
+.mbtn { padding:5px 14px; border-radius:7px; border:1px solid #333; background:#151522; color:#888; cursor:pointer; font-size:13px; }
 .mbtn.on { background:#0e2a40; color:#7eb8ff; border-color:#7eb8ff; }
 
 main { flex:1; display:flex; min-height:0; }
@@ -512,30 +512,30 @@ main { flex:1; display:flex; min-height:0; }
 .road-wrap { flex:0 0 170px; padding:10px 12px 0; }
 .road-wrap canvas { width:100%; height:150px; display:block; background:#111118; border:1px solid #252535; border-radius:6px; }
 
-.metrics-row { flex:0 0 auto; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; padding:8px 12px; }
-.mc { background:#101018; border:1px solid #252535; border-radius:6px; padding:8px; }
-.mc-label { font-size:9px; color:#556; text-transform:uppercase; letter-spacing:1px; }
-.mc-val { font-size:16px; color:#7eb8ff; font-weight:bold; margin-top:1px; }
-.mc-sub { font-size:9px; color:#445; margin-top:1px; }
+.metrics-row { flex:0 0 auto; display:grid; grid-template-columns:repeat(4,1fr); gap:8px; padding:10px 14px; }
+.mc { background:#101018; border:1px solid #252535; border-radius:6px; padding:10px; }
+.mc-label { font-size:12px; color:#889; text-transform:uppercase; letter-spacing:1px; font-weight:bold; }
+.mc-val { font-size:22px; color:#7eb8ff; font-weight:bold; margin-top:3px; }
+.mc-sub { font-size:12px; color:#667; margin-top:2px; }
 
 .stage-row { flex:0 0 auto; padding:0 12px 6px; }
 .stage-inner { background:#101018; border:1px solid #252535; border-radius:6px; padding:8px 10px; }
-.stage-title { font-size:9px; color:#556; letter-spacing:2px; text-transform:uppercase; }
-.stage-name { font-size:12px; color:#7eb8ff; margin-top:2px; }
+.stage-title { font-size:12px; color:#889; letter-spacing:2px; text-transform:uppercase; font-weight:bold; }
+.stage-name { font-size:14px; color:#7eb8ff; margin-top:3px; }
 .pips { display:flex; gap:5px; margin-top:6px; }
-.pip { flex:1; height:5px; border-radius:3px; background:#252535; transition:background .4s; }
+.pip { flex:1; height:6px; border-radius:3px; background:#252535; transition:background .4s; }
 .pip.done { background:#4caf50; }
 .pip.active { background:#7eb8ff; }
 
 /* Incident feed */
-.feed-wrap { flex:1; display:flex; flex-direction:column; min-height:0; padding:0 12px 10px; }
-.feed-title { font-size:9px; color:#556; letter-spacing:2px; text-transform:uppercase; margin-bottom:5px; display:flex; justify-content:space-between; }
+.feed-wrap { flex:1; display:flex; flex-direction:column; min-height:0; padding:0 14px 10px; }
+.feed-title { font-size:13px; color:#889; letter-spacing:2px; text-transform:uppercase; margin-bottom:6px; display:flex; justify-content:space-between; font-weight:bold; }
 .feed-title span { color:#7eb8ff; }
-.feed { flex:1; overflow-y:auto; background:#101018; border:1px solid #252535; border-radius:6px; font-size:10px; }
-.feed-row { display:grid; grid-template-columns:50px 1fr 90px 60px 50px; gap:0; padding:4px 8px; border-bottom:1px solid #181820; align-items:center; }
+.feed { flex:1; overflow-y:auto; background:#101018; border:1px solid #252535; border-radius:6px; font-size:13px; }
+.feed-row { display:grid; grid-template-columns:60px 1fr 100px 70px 50px; gap:0; padding:6px 10px; border-bottom:1px solid #181820; align-items:center; }
 .feed-row:hover { background:#14141e; }
-.feed-hdr { background:#131320; color:#556; font-size:9px; letter-spacing:1px; position:sticky; top:0; }
-.inc-type { font-size:9px; font-weight:bold; }
+.feed-hdr { background:#131320; color:#889; font-size:12px; letter-spacing:1px; position:sticky; top:0; font-weight:bold; }
+.inc-type { font-size:12px; font-weight:bold; }
 .inc-crash    { color:#f44336; }
 .inc-near     { color:#ff9800; }
 .inc-blocked  { color:#ffeb3b; }
@@ -550,26 +550,26 @@ main { flex:1; display:flex; min-height:0; }
 /* RIGHT */
 .right { flex:1; display:flex; flex-direction:column; min-height:0; padding:10px 12px; gap:8px; }
 .chart-wrap { flex:1; display:flex; flex-direction:column; min-height:0; }
-.chart-title { font-size:9px; color:#556; letter-spacing:2px; text-transform:uppercase; margin-bottom:4px; }
+.chart-title { font-size:13px; color:#889; letter-spacing:2px; text-transform:uppercase; margin-bottom:5px; font-weight:bold; }
 canvas.chart { flex:1; min-height:0; display:block; background:#101018; border:1px solid #252535; border-radius:6px; }
 .ep-wrap { flex:0 0 180px; display:flex; flex-direction:column; min-height:0; }
 .ep-table { flex:1; overflow-y:auto; background:#101018; border:1px solid #252535; border-radius:6px; }
-table { width:100%; border-collapse:collapse; font-size:10px; }
-th { padding:5px 8px; color:#556; text-align:left; border-bottom:1px solid #252535; position:sticky; top:0; background:#131320; font-size:9px; }
-td { padding:4px 8px; border-bottom:1px solid #13131a; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th { padding:6px 10px; color:#889; text-align:left; border-bottom:1px solid #252535; position:sticky; top:0; background:#131320; font-size:12px; font-weight:bold; }
+td { padding:5px 10px; border-bottom:1px solid #13131a; }
 .c-crash { color:#f44336; }
 .c-goal  { color:#4caf50; }
 .c-tout  { color:#ff9800; }
 
-.ppo-row { display:flex; gap:6px; flex-wrap:wrap; flex-shrink:0; }
-.pstat { background:#101018; border:1px solid #252535; border-radius:5px; padding:4px 10px; font-size:10px; }
+.ppo-row { display:flex; gap:8px; flex-wrap:wrap; flex-shrink:0; }
+.pstat { background:#101018; border:1px solid #252535; border-radius:5px; padding:6px 12px; font-size:13px; }
 .pstat span { color:#7eb8ff; }
 
-.rbtn { padding:3px 12px; border-radius:7px; border:1px solid #f44336; background:#1a0e0e; color:#f44336; cursor:pointer; font-size:11px; font-weight:bold; letter-spacing:1px; transition:all .2s; }
+.rbtn { padding:5px 14px; border-radius:7px; border:1px solid #f44336; background:#1a0e0e; color:#f44336; cursor:pointer; font-size:13px; font-weight:bold; letter-spacing:1px; transition:all .2s; }
 .rbtn:hover { background:#2a1515; border-color:#ff6659; color:#ff6659; }
 
-.info-note { background:#101018; border:1px solid #252535; border-radius:6px; padding:6px 10px; font-size:9px; color:#778; line-height:1.5; flex-shrink:0; }
-.info-note strong { color:#ffeb3b; font-size:9px; }
+.info-note { background:#101018; border:1px solid #252535; border-radius:6px; padding:8px 12px; font-size:12px; color:#99a; line-height:1.6; flex-shrink:0; }
+.info-note strong { color:#ffeb3b; font-size:12px; }
 </style>
 </head>
 <body>
@@ -577,7 +577,7 @@ td { padding:4px 8px; border-bottom:1px solid #13131a; }
   <h1>OVERFLOW OPENENV — INCIDENT MANAGEMENT</h1>
   <span id="sbadge" class="badge badge-ok">TRAINING</span>
   <div class="mode-row">
-    <span style="font-size:10px;color:#556">REWARD:</span>
+    <span style="font-size:13px;color:#889">REWARD:</span>
     <button class="mbtn on" id="bcap" onclick="setMode('capped')">CAPPED</button>
     <button class="mbtn" id="bunc" onclick="setMode('uncapped')">UNCAPPED (LLM tokens)</button>
     <span style="width:1px;height:18px;background:#252535;margin:0 4px"></span>
@@ -710,11 +710,11 @@ function drawRoad() {
     ctx.lineWidth=isEgo?2:1;
     ctx.beginPath(); ctx.roundRect(-18,-10,36,20,4); ctx.fill(); ctx.stroke();
     ctx.fillStyle=isEgo?'#7eb8ff':'#ff9800';
-    ctx.font=isEgo?'bold 8px Courier New':'7px Courier New';
+    ctx.font=isEgo?'bold 10px Courier New':'9px Courier New';
     ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillText(isEgo?'EGO':'C'+car.car_id,0,0);
     // Speed indicator
-    ctx.fillStyle='rgba(255,255,255,0.3)'; ctx.font='6px Courier New'; ctx.textBaseline='top';
+    ctx.fillStyle='rgba(255,255,255,0.4)'; ctx.font='8px Courier New'; ctx.textBaseline='top';
     ctx.fillText(Math.round(car.speed),0,11);
     ctx.restore();
   }
@@ -730,11 +730,11 @@ function drawLineChart(canvasId, data, color, label, yMin, yMax, showZero) {
   const ctx=canvas.getContext('2d');
   ctx.clearRect(0,0,w,h);
   if(!data||data.length<2){
-    ctx.fillStyle='#445'; ctx.font='11px Courier New'; ctx.textAlign='center';
+    ctx.fillStyle='#667'; ctx.font='14px Courier New'; ctx.textAlign='center';
     ctx.fillText('Waiting for episodes...', w/2, h/2);
     return;
   }
-  const pad={t:10,r:10,b:24,l:52};
+  const pad={t:12,r:12,b:28,l:58};
   const pw=w-pad.l-pad.r, ph=h-pad.t-pad.b;
   const mn = yMin!==undefined?yMin:Math.min(...data);
   const mx = yMax!==undefined?yMax:Math.max(...data);
@@ -748,8 +748,8 @@ function drawLineChart(canvasId, data, color, label, yMin, yMax, showZero) {
   for(let i=0;i<=4;i++){
     const y=pad.t+ph*(i/4);
     ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(pad.l+pw,y);ctx.stroke();
-    ctx.fillStyle='#445'; ctx.font='8px Courier New'; ctx.textAlign='right';
-    ctx.fillText((mx-rng*(i/4)).toFixed(1), pad.l-3, y+3);
+    ctx.fillStyle='#889'; ctx.font='11px Courier New'; ctx.textAlign='right';
+    ctx.fillText((mx-rng*(i/4)).toFixed(1), pad.l-4, y+4);
   }
 
   // Zero line
@@ -773,8 +773,8 @@ function drawLineChart(canvasId, data, color, label, yMin, yMax, showZero) {
   ctx.strokeStyle='rgba(255,235,59,0.6)'; ctx.lineWidth=1; ctx.setLineDash([6,4]);
   ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(pad.l+pw,gy);ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle='rgba(255,235,59,0.8)'; ctx.font='bold 9px Courier New'; ctx.textAlign='left';
-  ctx.fillText('\u03bc='+globalMean.toFixed(2), pad.l+4, gy-5);
+  ctx.fillStyle='rgba(255,235,59,0.9)'; ctx.font='bold 12px Courier New'; ctx.textAlign='left';
+  ctx.fillText('\u03bc='+globalMean.toFixed(2), pad.l+4, gy-6);
 
   // Raw line (faint)
   ctx.strokeStyle=color+'33'; ctx.lineWidth=1; ctx.beginPath();
@@ -787,10 +787,10 @@ function drawLineChart(canvasId, data, color, label, yMin, yMax, showZero) {
   ctx.stroke();
 
   // X-axis: t=0 on left, current episode on right
-  ctx.fillStyle='#445'; ctx.font='8px Courier New';
-  ctx.textAlign='left';  ctx.fillText('t=0', pad.l, h-4);
-  ctx.textAlign='right'; ctx.fillText('t='+n, pad.l+pw, h-4);
-  ctx.textAlign='center';ctx.fillText(label, pad.l+pw/2, h-4);
+  ctx.fillStyle='#889'; ctx.font='11px Courier New';
+  ctx.textAlign='left';  ctx.fillText('t=0', pad.l, h-5);
+  ctx.textAlign='right'; ctx.fillText('t='+n, pad.l+pw, h-5);
+  ctx.textAlign='center';ctx.fillText(label, pad.l+pw/2, h-5);
 }
 
 // Reward chart with dual Y-axes: per-episode reward (left) + cumulative net (right)
@@ -803,11 +803,11 @@ function drawRewardChart() {
   const data = S.reward_history||[];
   const cumul = S.cumulative_reward||[];
   if(!data||data.length<2){
-    ctx.fillStyle='#445'; ctx.font='11px Courier New'; ctx.textAlign='center';
+    ctx.fillStyle='#667'; ctx.font='14px Courier New'; ctx.textAlign='center';
     ctx.fillText('Waiting for episodes...', w/2, h/2);
     return;
   }
-  const pad={t:10,r:52,b:24,l:52};
+  const pad={t:12,r:58,b:28,l:58};
   const pw=w-pad.l-pad.r, ph=h-pad.t-pad.b;
   const n = data.length;
   const xOf = i => pad.l + i*(pw/(n-1||1));
@@ -829,14 +829,14 @@ function drawRewardChart() {
   for(let i=0;i<=4;i++){
     const y=pad.t+ph*(i/4);
     ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(pad.l+pw,y);ctx.stroke();
-    ctx.fillStyle='#556'; ctx.font='8px Courier New'; ctx.textAlign='right';
-    ctx.fillText((mx1-rng1*(i/4)).toFixed(1), pad.l-3, y+3);
+    ctx.fillStyle='#889'; ctx.font='11px Courier New'; ctx.textAlign='right';
+    ctx.fillText((mx1-rng1*(i/4)).toFixed(1), pad.l-4, y+4);
   }
   // Right Y labels (cumulative)
   for(let i=0;i<=4;i++){
     const y=pad.t+ph*(i/4);
-    ctx.fillStyle='#ff985580'; ctx.font='8px Courier New'; ctx.textAlign='left';
-    ctx.fillText((mx2-rng2*(i/4)).toFixed(0), pad.l+pw+3, y+3);
+    ctx.fillStyle='#ff9855aa'; ctx.font='11px Courier New'; ctx.textAlign='left';
+    ctx.fillText((mx2-rng2*(i/4)).toFixed(0), pad.l+pw+4, y+4);
   }
 
   // Zero line
@@ -853,8 +853,8 @@ function drawRewardChart() {
   ctx.strokeStyle='rgba(255,235,59,0.6)'; ctx.lineWidth=1; ctx.setLineDash([6,4]);
   ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(pad.l+pw,gy);ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle='rgba(255,235,59,0.9)'; ctx.font='bold 9px Courier New'; ctx.textAlign='left';
-  ctx.fillText('\u03bc='+globalMean.toFixed(2), pad.l+4, gy-5);
+  ctx.fillStyle='rgba(255,235,59,0.9)'; ctx.font='bold 12px Courier New'; ctx.textAlign='left';
+  ctx.fillText('\u03bc='+globalMean.toFixed(2), pad.l+4, gy-6);
 
   // MA
   const MA = Math.max(5, Math.min(30, Math.floor(n/10)));
@@ -881,14 +881,14 @@ function drawRewardChart() {
   }
 
   // X-axis
-  ctx.fillStyle='#445'; ctx.font='8px Courier New';
-  ctx.textAlign='left';  ctx.fillText('t=0', pad.l, h-4);
-  ctx.textAlign='right'; ctx.fillText('t='+n, pad.l+pw, h-4);
+  ctx.fillStyle='#889'; ctx.font='11px Courier New';
+  ctx.textAlign='left';  ctx.fillText('t=0', pad.l, h-5);
+  ctx.textAlign='right'; ctx.fillText('t='+n, pad.l+pw, h-5);
 
   // Legend
-  ctx.font='8px Courier New'; ctx.textAlign='center';
-  ctx.fillStyle='#7eb8ff'; ctx.fillText('\u25CF per-ep', pad.l+pw*0.3, h-4);
-  ctx.fillStyle='#ff9855'; ctx.fillText('\u25CF net cumul.', pad.l+pw*0.7, h-4);
+  ctx.font='bold 11px Courier New'; ctx.textAlign='center';
+  ctx.fillStyle='#7eb8ff'; ctx.fillText('\u25CF per-ep', pad.l+pw*0.3, h-5);
+  ctx.fillStyle='#ff9855'; ctx.fillText('\u25CF net cumul.', pad.l+pw*0.7, h-5);
 
   // Update title
   const net = cumul.length? cumul[cumul.length-1] : 0;
