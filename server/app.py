@@ -379,9 +379,13 @@ def _training_loop() -> None:
 
 app = FastAPI(title="Overflow OpenENV")
 
+_training_thread: Optional[threading.Thread] = None
+
 @app.on_event("startup")
 def _start_training():
-    threading.Thread(target=_training_loop, daemon=True).start()
+    global _training_thread
+    _training_thread = threading.Thread(target=_training_loop, daemon=True)
+    _training_thread.start()
 
 @app.get("/health")
 def health():
@@ -396,6 +400,21 @@ def set_mode(req: ModeRequest):
         return {"error": "mode must be capped or uncapped"}
     set_reward_mode(req.mode)
     return {"mode": req.mode}
+
+@app.post("/api/restart")
+def restart_training():
+    global _state, _training_thread, _ep_correct, _ep_total
+    with _state_lock:
+        mode = _state.reward_mode  # preserve current mode selection
+        _state = TrainingState()
+        _state.reward_mode = mode
+    _ep_correct = 0
+    _ep_total = 0
+    _sse_queue.clear()
+    # Start a fresh training thread (old one is daemon and will die)
+    _training_thread = threading.Thread(target=_training_loop, daemon=True)
+    _training_thread.start()
+    return {"status": "restarted"}
 
 @app.get("/api/state")
 def get_state():
@@ -545,6 +564,12 @@ td { padding:4px 8px; border-bottom:1px solid #13131a; }
 .ppo-row { display:flex; gap:6px; flex-wrap:wrap; flex-shrink:0; }
 .pstat { background:#101018; border:1px solid #252535; border-radius:5px; padding:4px 10px; font-size:10px; }
 .pstat span { color:#7eb8ff; }
+
+.rbtn { padding:3px 12px; border-radius:7px; border:1px solid #f44336; background:#1a0e0e; color:#f44336; cursor:pointer; font-size:11px; font-weight:bold; letter-spacing:1px; transition:all .2s; }
+.rbtn:hover { background:#2a1515; border-color:#ff6659; color:#ff6659; }
+
+.info-note { background:#101018; border:1px solid #252535; border-radius:6px; padding:6px 10px; font-size:9px; color:#778; line-height:1.5; flex-shrink:0; }
+.info-note strong { color:#ffeb3b; font-size:9px; }
 </style>
 </head>
 <body>
@@ -555,6 +580,8 @@ td { padding:4px 8px; border-bottom:1px solid #13131a; }
     <span style="font-size:10px;color:#556">REWARD:</span>
     <button class="mbtn on" id="bcap" onclick="setMode('capped')">CAPPED</button>
     <button class="mbtn" id="bunc" onclick="setMode('uncapped')">UNCAPPED (LLM tokens)</button>
+    <span style="width:1px;height:18px;background:#252535;margin:0 4px"></span>
+    <button class="rbtn" onclick="restartTraining()">RESTART</button>
   </div>
 </header>
 
@@ -591,9 +618,17 @@ td { padding:4px 8px; border-bottom:1px solid #13131a; }
 
   <!-- RIGHT -->
   <div class="right">
-    <div class="chart-wrap" style="flex:0 0 45%">
+    <div class="chart-wrap" style="flex:0 0 42%">
       <div class="chart-title" id="rw-title">EPISODE REWARD — CAPPED | mean: 0.00 | net: 0.00</div>
       <canvas class="chart" id="rwChart"></canvas>
+    </div>
+    <div class="info-note">
+      <strong>Why does net reward start negative?</strong>
+      Early in training the agent has a random policy — it crashes frequently and earns large negative penalties
+      (collision = heavy punishment). The cumulative net drops as these early failures stack up. As PPO learns to
+      avoid crashes and respond correctly to incidents, per-episode rewards turn positive and the net climbs back.
+      The crossover point where net goes positive is when the agent's learned gains have fully offset its early
+      exploration cost — a sign that training is working.
     </div>
     <div class="chart-wrap" style="flex:0 0 28%">
       <div class="chart-title">RESPONSE ACCURACY % (per episode)</div>
@@ -966,6 +1001,19 @@ function renderAll() {
 function setMode(mode) {
   fetch('/api/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})})
     .then(r=>r.json()).then(d=>{S.reward_mode=d.mode;updateUI();});
+}
+
+// ── Restart training ──────────────────────────────────────────────────────
+function restartTraining() {
+  if(!confirm('Restart training from scratch? All progress will be reset.')) return;
+  fetch('/api/restart',{method:'POST'}).then(r=>r.json()).then(()=>{
+    S.reward_history=[]; S.cumulative_reward=[]; S.accuracy_history=[];
+    S.episode_history=[]; S.incident_feed=[]; S.incident_counts={};
+    S.total_steps=0; S.n_episodes=0; S.n_updates=0;
+    S.episode_reward=0; S.episode_steps=0; S.mean_reward=0;
+    S.response_accuracy=0;
+    renderAll();
+  });
 }
 
 // ── SSE for fast events ───────────────────────────────────────────────────
