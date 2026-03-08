@@ -104,6 +104,7 @@ class TrainingState:
     total_responses: int         = 0
     # History for charts
     reward_history: List[float]  = field(default_factory=list)   # per-episode cumulative
+    cumulative_reward: List[float] = field(default_factory=list) # running net total
     accuracy_history: List[float]= field(default_factory=list)   # per-episode correct%
     episode_history: List[Dict]  = field(default_factory=list)
     # PPO
@@ -305,13 +306,10 @@ def _training_loop() -> None:
                         _state.mean_reward_100  = round(float(np.mean(ep_rewards)), 2)
                         _state.mean_ep_len      = round(float(np.mean(ep_lengths)), 1)
                         _state.reward_history.append(round(ep_reward, 2))
+                        prev_cum = _state.cumulative_reward[-1] if _state.cumulative_reward else 0.0
+                        _state.cumulative_reward.append(round(prev_cum + ep_reward, 2))
                         _state.accuracy_history.append(round(acc, 1))
-                        if len(_state.reward_history) > 500:
-                            _state.reward_history   = _state.reward_history[-500:]
-                            _state.accuracy_history = _state.accuracy_history[-500:]
                         _state.episode_history.append(ep_rec)
-                        if len(_state.episode_history) > 200:
-                            _state.episode_history = _state.episode_history[-200:]
 
                     _push_sse({"type": "episode", "data": ep_rec})
 
@@ -419,8 +417,9 @@ def get_state():
             "pg_loss":           s.last_pg_loss,
             "vf_loss":           s.last_vf_loss,
             "entropy":           s.last_entropy,
-            "reward_history":    s.reward_history[-300:],
-            "accuracy_history":  s.accuracy_history[-300:],
+            "reward_history":    s.reward_history,
+            "cumulative_reward": s.cumulative_reward,
+            "accuracy_history":  s.accuracy_history,
             "episode_history":   s.episode_history[-50:],
             "incident_feed":     s.incident_feed[-30:],
             "incident_counts":   s.incident_counts,
@@ -593,7 +592,7 @@ td { padding:4px 8px; border-bottom:1px solid #13131a; }
   <!-- RIGHT -->
   <div class="right">
     <div class="chart-wrap" style="flex:0 0 45%">
-      <div class="chart-title">EPISODE REWARD HISTORY</div>
+      <div class="chart-title" id="rw-title">EPISODE REWARD — CAPPED | mean: 0.00 | net: 0.00</div>
       <canvas class="chart" id="rwChart"></canvas>
     </div>
     <div class="chart-wrap" style="flex:0 0 28%">
@@ -619,7 +618,7 @@ td { padding:4px 8px; border-bottom:1px solid #13131a; }
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
 let S = {
-  cars:[], reward_history:[], accuracy_history:[], episode_history:[],
+  cars:[], reward_history:[], cumulative_reward:[], accuracy_history:[], episode_history:[],
   incident_feed:[], incident_counts:{}, stage:1, reward_mode:'capped',
   response_accuracy:0, total_steps:0, n_episodes:0, n_updates:0,
   ego_x:0, goal_x:180, episode_reward:0, episode_steps:0,
@@ -687,6 +686,8 @@ function drawRoad() {
 }
 
 // ── Chart drawing ────────────────────────────────────────────────────────
+// Shows ALL data from t=0 to current t. X-axis scales to fit all episodes.
+// Draws: raw (faint), MA (bright), global mean (dashed yellow).
 function drawLineChart(canvasId, data, color, label, yMin, yMax, showZero) {
   const canvas = document.getElementById(canvasId);
   const w = canvas.offsetWidth||400, h = canvas.offsetHeight||160;
@@ -695,15 +696,19 @@ function drawLineChart(canvasId, data, color, label, yMin, yMax, showZero) {
   ctx.clearRect(0,0,w,h);
   if(!data||data.length<2){
     ctx.fillStyle='#445'; ctx.font='11px Courier New'; ctx.textAlign='center';
-    ctx.fillText('Waiting for data...', w/2, h/2);
+    ctx.fillText('Waiting for episodes...', w/2, h/2);
     return;
   }
-  const pad={t:8,r:8,b:22,l:48};
+  const pad={t:10,r:10,b:24,l:52};
   const pw=w-pad.l-pad.r, ph=h-pad.t-pad.b;
   const mn = yMin!==undefined?yMin:Math.min(...data);
   const mx = yMax!==undefined?yMax:Math.max(...data);
   const rng = mx-mn||1;
-  // Grid
+  const n   = data.length;
+  const xOf = i => pad.l + i*(pw/(n-1||1));
+  const yOf = v => pad.t + (mx-v)/rng*ph;
+
+  // Grid lines + Y labels
   ctx.strokeStyle='#1a1a28'; ctx.lineWidth=1;
   for(let i=0;i<=4;i++){
     const y=pad.t+ph*(i/4);
@@ -711,33 +716,150 @@ function drawLineChart(canvasId, data, color, label, yMin, yMax, showZero) {
     ctx.fillStyle='#445'; ctx.font='8px Courier New'; ctx.textAlign='right';
     ctx.fillText((mx-rng*(i/4)).toFixed(1), pad.l-3, y+3);
   }
+
   // Zero line
   if(showZero && mn<0 && mx>0){
-    const zy=pad.t+(mx/rng)*ph;
-    ctx.strokeStyle='#3a3a50'; ctx.setLineDash([4,4]);
+    const zy=yOf(0);
+    ctx.strokeStyle='#3a3a50'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
     ctx.beginPath();ctx.moveTo(pad.l,zy);ctx.lineTo(pad.l+pw,zy);ctx.stroke();
     ctx.setLineDash([]);
   }
-  // MA-10
-  const ma=data.map((_,i)=>{
-    const sl=data.slice(Math.max(0,i-9),i+1);
+
+  // MA window: adaptive
+  const MA = Math.max(5, Math.min(30, Math.floor(n/10)));
+  const ma = data.map((_,i)=>{
+    const sl=data.slice(Math.max(0,i-MA+1),i+1);
     return sl.reduce((a,b)=>a+b,0)/sl.length;
   });
-  // Raw
-  ctx.strokeStyle=color+'44'; ctx.lineWidth=1; ctx.beginPath();
-  data.forEach((v,i)=>{
-    const x=pad.l+i*(pw/(data.length-1)), y=pad.t+(mx-v)/rng*ph;
-    i?ctx.lineTo(x,y):ctx.moveTo(x,y);
-  }); ctx.stroke();
-  // Smoothed
+
+  // Global mean (horizontal dashed line)
+  const globalMean = data.reduce((a,b)=>a+b,0)/n;
+  const gy = yOf(globalMean);
+  ctx.strokeStyle='rgba(255,235,59,0.6)'; ctx.lineWidth=1; ctx.setLineDash([6,4]);
+  ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(pad.l+pw,gy);ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle='rgba(255,235,59,0.8)'; ctx.font='bold 9px Courier New'; ctx.textAlign='left';
+  ctx.fillText('\u03bc='+globalMean.toFixed(2), pad.l+4, gy-5);
+
+  // Raw line (faint)
+  ctx.strokeStyle=color+'33'; ctx.lineWidth=1; ctx.beginPath();
+  data.forEach((v,i)=>{ i?ctx.lineTo(xOf(i),yOf(v)):ctx.moveTo(xOf(i),yOf(v)); });
+  ctx.stroke();
+
+  // Smoothed MA line
   ctx.strokeStyle=color; ctx.lineWidth=2; ctx.beginPath();
-  ma.forEach((v,i)=>{
-    const x=pad.l+i*(pw/(ma.length-1)), y=pad.t+(mx-v)/rng*ph;
-    i?ctx.lineTo(x,y):ctx.moveTo(x,y);
-  }); ctx.stroke();
-  // X label
-  ctx.fillStyle='#445'; ctx.font='8px Courier New'; ctx.textAlign='center';
-  ctx.fillText(label+' ('+data.length+')', pad.l+pw/2, h-4);
+  ma.forEach((v,i)=>{ i?ctx.lineTo(xOf(i),yOf(v)):ctx.moveTo(xOf(i),yOf(v)); });
+  ctx.stroke();
+
+  // X-axis: t=0 on left, current episode on right
+  ctx.fillStyle='#445'; ctx.font='8px Courier New';
+  ctx.textAlign='left';  ctx.fillText('t=0', pad.l, h-4);
+  ctx.textAlign='right'; ctx.fillText('t='+n, pad.l+pw, h-4);
+  ctx.textAlign='center';ctx.fillText(label, pad.l+pw/2, h-4);
+}
+
+// Reward chart with dual Y-axes: per-episode reward (left) + cumulative net (right)
+function drawRewardChart() {
+  const canvas = document.getElementById('rwChart');
+  const w = canvas.offsetWidth||400, h = canvas.offsetHeight||160;
+  canvas.width=w; canvas.height=h;
+  const ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,w,h);
+  const data = S.reward_history||[];
+  const cumul = S.cumulative_reward||[];
+  if(!data||data.length<2){
+    ctx.fillStyle='#445'; ctx.font='11px Courier New'; ctx.textAlign='center';
+    ctx.fillText('Waiting for episodes...', w/2, h/2);
+    return;
+  }
+  const pad={t:10,r:52,b:24,l:52};
+  const pw=w-pad.l-pad.r, ph=h-pad.t-pad.b;
+  const n = data.length;
+  const xOf = i => pad.l + i*(pw/(n-1||1));
+
+  // Left Y: per-episode reward
+  const mn1 = Math.min(...data);
+  const mx1 = Math.max(...data);
+  const rng1 = mx1-mn1||1;
+  const yOf1 = v => pad.t + (mx1-v)/rng1*ph;
+
+  // Right Y: cumulative net reward
+  const mn2 = cumul.length? Math.min(...cumul) : 0;
+  const mx2 = cumul.length? Math.max(...cumul) : 1;
+  const rng2 = mx2-mn2||1;
+  const yOf2 = v => pad.t + (mx2-v)/rng2*ph;
+
+  // Grid lines + left Y labels
+  ctx.strokeStyle='#1a1a28'; ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){
+    const y=pad.t+ph*(i/4);
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(pad.l+pw,y);ctx.stroke();
+    ctx.fillStyle='#556'; ctx.font='8px Courier New'; ctx.textAlign='right';
+    ctx.fillText((mx1-rng1*(i/4)).toFixed(1), pad.l-3, y+3);
+  }
+  // Right Y labels (cumulative)
+  for(let i=0;i<=4;i++){
+    const y=pad.t+ph*(i/4);
+    ctx.fillStyle='#ff985580'; ctx.font='8px Courier New'; ctx.textAlign='left';
+    ctx.fillText((mx2-rng2*(i/4)).toFixed(0), pad.l+pw+3, y+3);
+  }
+
+  // Zero line
+  if(mn1<0 && mx1>0){
+    const zy=yOf1(0);
+    ctx.strokeStyle='#3a3a50'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+    ctx.beginPath();ctx.moveTo(pad.l,zy);ctx.lineTo(pad.l+pw,zy);ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Global mean (horizontal dashed line)
+  const globalMean = data.reduce((a,b)=>a+b,0)/n;
+  const gy = yOf1(globalMean);
+  ctx.strokeStyle='rgba(255,235,59,0.6)'; ctx.lineWidth=1; ctx.setLineDash([6,4]);
+  ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(pad.l+pw,gy);ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle='rgba(255,235,59,0.9)'; ctx.font='bold 9px Courier New'; ctx.textAlign='left';
+  ctx.fillText('\u03bc='+globalMean.toFixed(2), pad.l+4, gy-5);
+
+  // MA
+  const MA = Math.max(5, Math.min(30, Math.floor(n/10)));
+  const ma = data.map((_,i)=>{
+    const sl=data.slice(Math.max(0,i-MA+1),i+1);
+    return sl.reduce((a,b)=>a+b,0)/sl.length;
+  });
+
+  // Raw per-episode line (faint blue)
+  ctx.strokeStyle='#7eb8ff33'; ctx.lineWidth=1; ctx.beginPath();
+  data.forEach((v,i)=>{ i?ctx.lineTo(xOf(i),yOf1(v)):ctx.moveTo(xOf(i),yOf1(v)); });
+  ctx.stroke();
+
+  // Smoothed MA per-episode (bright blue)
+  ctx.strokeStyle='#7eb8ff'; ctx.lineWidth=2; ctx.beginPath();
+  ma.forEach((v,i)=>{ i?ctx.lineTo(xOf(i),yOf1(v)):ctx.moveTo(xOf(i),yOf1(v)); });
+  ctx.stroke();
+
+  // Cumulative net reward (orange, right axis)
+  if(cumul.length>=2){
+    ctx.strokeStyle='#ff9855'; ctx.lineWidth=2; ctx.beginPath();
+    cumul.forEach((v,i)=>{ i?ctx.lineTo(xOf(i),yOf2(v)):ctx.moveTo(xOf(i),yOf2(v)); });
+    ctx.stroke();
+  }
+
+  // X-axis
+  ctx.fillStyle='#445'; ctx.font='8px Courier New';
+  ctx.textAlign='left';  ctx.fillText('t=0', pad.l, h-4);
+  ctx.textAlign='right'; ctx.fillText('t='+n, pad.l+pw, h-4);
+
+  // Legend
+  ctx.font='8px Courier New'; ctx.textAlign='center';
+  ctx.fillStyle='#7eb8ff'; ctx.fillText('\u25CF per-ep', pad.l+pw*0.3, h-4);
+  ctx.fillStyle='#ff9855'; ctx.fillText('\u25CF net cumul.', pad.l+pw*0.7, h-4);
+
+  // Update title
+  const net = cumul.length? cumul[cumul.length-1] : 0;
+  const modeLabel = S.reward_mode.toUpperCase();
+  document.getElementById('rw-title').textContent =
+    'EPISODE REWARD \u2014 '+modeLabel+' | \u03bc: '+globalMean.toFixed(2)+' | net: '+net.toFixed(2);
 }
 
 // ── Incident feed ────────────────────────────────────────────────────────
@@ -833,7 +955,7 @@ function updateUI() {
 // ── Render all ────────────────────────────────────────────────────────────
 function renderAll() {
   drawRoad();
-  drawLineChart('rwChart', S.reward_history, '#7eb8ff', 'Episodes', undefined, undefined, true);
+  drawRewardChart();
   drawLineChart('accChart', S.accuracy_history, '#4caf50', 'Episodes', 0, 100, false);
   renderFeed(S.incident_feed||[]);
   renderEpTable(S.episode_history||[]);
@@ -861,10 +983,13 @@ evtSrc.onmessage = (e) => {
       S.episode_history.push(msg.data);
       if(!S.reward_history) S.reward_history=[];
       S.reward_history.push(msg.data.reward);
+      if(!S.cumulative_reward) S.cumulative_reward=[];
+      const prevNet = S.cumulative_reward.length? S.cumulative_reward[S.cumulative_reward.length-1] : 0;
+      S.cumulative_reward.push(prevNet + msg.data.reward);
       if(!S.accuracy_history) S.accuracy_history=[];
       S.accuracy_history.push(msg.data.accuracy||0);
       renderEpTable(S.episode_history);
-      drawLineChart('rwChart', S.reward_history, '#7eb8ff', 'Episodes', undefined, undefined, true);
+      drawRewardChart();
       drawLineChart('accChart', S.accuracy_history, '#4caf50', 'Episodes', 0, 100, false);
     } else if(msg.type==='tick'){
       Object.assign(S, msg.data);
