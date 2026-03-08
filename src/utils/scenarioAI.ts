@@ -17,7 +17,7 @@ export function setApiKey(key: string) {
   localStorage.setItem(LS_KEY, key);
 }
 
-const SYSTEM_PROMPT = `You are an expert autonomous vehicle simulation engineer building scenarios for OpenENV, a self-driving perception visualization platform.
+const SYSTEM_PROMPT = `You are an expert autonomous vehicle simulation engineer building scenarios for Overflow, a self-driving perception visualization platform.
 
 Given a natural-language driving scenario, produce ONLY a valid JSON object (no markdown, no explanation).
 

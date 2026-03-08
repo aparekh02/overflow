@@ -55,27 +55,27 @@ const ATTR_INDEX: Record<ColormapMode, number> = {
 };
 
 const MAX_POINTS = 250_000;
+const MAX_POINTS_LITE = 18_000;
 
-export default function PointCloud() {
+export default function PointCloud({ lite = false }: { lite?: boolean }) {
+  const maxPts = lite ? MAX_POINTS_LITE : MAX_POINTS;
   const geometryRef = useRef<THREE.BufferGeometry>(null);
   const lastFrameRef = useRef<FrameData | null>(null);
   const lastColormapRef = useRef<ColormapMode>("intensity");
 
   const { posAttr, colorAttr } = useMemo(() => {
-    const pos = new THREE.Float32BufferAttribute(new Float32Array(MAX_POINTS * 3), 3);
-    const col = new THREE.Float32BufferAttribute(new Float32Array(MAX_POINTS * 3), 3);
+    const pos = new THREE.Float32BufferAttribute(new Float32Array(maxPts * 3), 3);
+    const col = new THREE.Float32BufferAttribute(new Float32Array(maxPts * 3), 3);
     pos.setUsage(THREE.DynamicDrawUsage);
     col.setUsage(THREE.DynamicDrawUsage);
     return { posAttr: pos, colorAttr: col };
-  }, []);
+  }, [maxPts]);
 
   // Read opacity once via subscription (rarely changes)
   const pointOpacity = useStore((s) => s.pointOpacity);
 
-  // Frame override for independent dashboard tiles
-  const frameOverride = useContext(FrameOverrideContext);
-  const overrideRef = useRef(frameOverride);
-  overrideRef.current = frameOverride;
+  // Frame override for independent dashboard tiles — stable ref holder, no re-renders
+  const overrideHolder = useContext(FrameOverrideContext);
 
   useFrame(() => {
     const geom = geometryRef.current;
@@ -83,7 +83,7 @@ export default function PointCloud() {
 
     // Use override if provided, otherwise read from global store
     const state = useStore.getState();
-    const currentFrame = overrideRef.current ?? state.currentFrame;
+    const currentFrame = overrideHolder?.current ?? state.currentFrame;
     const colormapMode = state.colormapMode;
 
     // Early out if nothing changed
@@ -103,14 +103,29 @@ export default function PointCloud() {
     const attrIdx = ATTR_INDEX[colormapMode];
     const [attrMin, attrMax] = ATTR_RANGE[colormapMode];
     const invSpan = 1 / (attrMax - attrMin);
-    const total = Math.min(pointCount, MAX_POINTS);
 
-    // Bulk copy positions
-    posArr.set(pointPositions.subarray(0, total * 3));
+    // In lite mode, stride through points to downsample (e.g. take every Nth point)
+    const stride = lite ? Math.max(1, Math.ceil(pointCount / maxPts)) : 1;
+    const total = Math.min(Math.ceil(pointCount / stride), maxPts);
+
+    if (stride === 1) {
+      // Bulk copy positions (fast path)
+      posArr.set(pointPositions.subarray(0, total * 3));
+    } else {
+      // Strided copy for lite mode
+      for (let i = 0; i < total; i++) {
+        const src = i * stride * 3;
+        const dst = i * 3;
+        posArr[dst] = pointPositions[src];
+        posArr[dst + 1] = pointPositions[src + 1];
+        posArr[dst + 2] = pointPositions[src + 2];
+      }
+    }
 
     // Fast LUT-based coloring
     for (let i = 0; i < total; i++) {
-      const raw = pointAttributes[i * 3 + attrIdx];
+      const srcIdx = (stride === 1 ? i : i * stride);
+      const raw = pointAttributes[srcIdx * 3 + attrIdx];
       const t = (raw - attrMin) * invSpan;
       const lutIdx = Math.max(0, Math.min(255, (t * 255) | 0)) * 3;
       const dst = i * 3;
@@ -131,7 +146,7 @@ export default function PointCloud() {
         <primitive object={colorAttr} attach="attributes-color" />
       </bufferGeometry>
       <pointsMaterial
-        size={0.06}
+        size={lite ? 0.12 : 0.06}
         sizeAttenuation
         vertexColors
         transparent

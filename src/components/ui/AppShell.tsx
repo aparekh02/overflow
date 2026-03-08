@@ -84,7 +84,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             color: colors.textPrimary,
             letterSpacing: "-0.01em",
           }}>
-            OpenENV
+            Overflow
           </span>
         </div>
 
@@ -165,7 +165,7 @@ function OpenEnvStatus() {
         ...typeScale.caption,
         color: colors.textSecondary,
       }}>
-        OpenEnv
+        Overflow
       </span>
     </div>
   );

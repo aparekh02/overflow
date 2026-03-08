@@ -95,7 +95,7 @@ export default function AnalyticsPanel({
             fontSize: 10, color: colors.textDim, fontFamily: fonts.mono,
             background: "rgba(255,255,255,0.04)", padding: "3px 10px", borderRadius: 4,
           }}>
-            OpenENV Dashboard
+            Overflow Dashboard
           </span>
         </div>
         <button onClick={onClose} style={{
@@ -393,7 +393,7 @@ function StatsTab() {
 function AgentsTab() {
   return (
     <div>
-      <SectionTitle>Agent Hierarchy — OpenENV Processing Pipeline</SectionTitle>
+      <SectionTitle>Agent Hierarchy — Overflow Processing Pipeline</SectionTitle>
       <div style={{
         display: "flex", flexDirection: "column", gap: 0,
         background: "rgba(255,255,255,0.02)", borderRadius: 10,
@@ -402,7 +402,7 @@ function AgentsTab() {
       }}>
         <AgentNode
           level={0}
-          name="OpenENV Orchestrator"
+          name="Overflow Orchestrator"
           role="Root coordinator — manages data flow between all subsystems"
           status="active"
           icon="🧠"

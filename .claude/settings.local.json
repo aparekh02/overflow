@@ -9,7 +9,9 @@
       "Bash(curl:*)",
       "Bash(du -sh /Users/kuant/hackathons/overflow/public/waymo_data/* 2>/dev/null | head -20)",
       "Bash(find /Users/kuant/hackathons/overflow -maxdepth 2 -type f \\\\\\( -name \"README*\" -o -name \"*.md\" \\\\\\) 2>/dev/null | grep -v node_modules)",
-      "Bash(pkill -f \"node.*vite\" && pkill -f \"npm.*vite\" && pkill -f \"npm run dev\" && pkill -f \"esbuild.*overflow\")"
+      "Bash(pkill -f \"node.*vite\" && pkill -f \"npm.*vite\" && pkill -f \"npm run dev\" && pkill -f \"esbuild.*overflow\")",
+      "Bash(npm run build 2>&1 | tail -40)",
+      "Bash(npm run build 2>&1 | grep -E \"^\\(src/components/Scene3D|src/pages/DashboardPage|src/components/PointCloud|src/components/BoundingBoxes|src/components/FrameOverride\\)\" | head -202)"
     ]
   }
 }

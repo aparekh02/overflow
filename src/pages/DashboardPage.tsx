@@ -11,7 +11,7 @@
  * loaded from static files — no runtime counterfactual spawning.
  */
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Play,
@@ -24,7 +24,8 @@ import Timeline from "../components/Timeline";
 import Badge from "../components/ui/Badge";
 import { useStore } from "../store";
 import { SCENARIO_INFO, VARIANT_INFO, VARIANT_METRICS } from "../mockData";
-import type { SceneData, SceneVariant, FrameData, VariantMetrics } from "../mockData";
+import type { SceneData, SceneVariant, VariantMetrics } from "../mockData";
+import type { FrameOverrideHolder } from "../components/FrameOverrideContext";
 import { loadScenarioVariants } from "../utils/scenarioLoader";
 import { colors, fonts, typeScale, spacing, glass, radius } from "../theme";
 
@@ -50,9 +51,9 @@ export default function DashboardPage() {
     });
   }, [scenarioId]);
 
-  // Pause playback when entering the dashboard
+  // Auto-play everything when entering the dashboard
   useEffect(() => {
-    actions.setPlaying(false);
+    actions.setPlaying(true);
   }, []);
 
   const scenarioMeta = SCENARIO_INFO[scenarioId];
@@ -185,39 +186,50 @@ function VariantTile({
   metrics: VariantMetrics;
 }) {
   const info = VARIANT_INFO[variant];
-  const [frameIndex, setFrameIndex] = useState(0);
-  const [playing, setPlaying] = useState(false);
+  const [playing, setPlaying] = useState(true);
+  const [displayTime, setDisplayTime] = useState("0.0");
   const frameRef = useRef(0);
-  const lastTimeRef = useRef(0);
 
-  // Independent playback loop
+  // Stable mutable holder — never changes reference, so Scene3D context won't re-render children
+  const frameHolder = useMemo<FrameOverrideHolder>(() => ({ current: sceneData.frames[0] ?? null }), []);
+
+  // Playback via requestAnimationFrame — updates holder.current without React setState
+  // Only updates the displayTime string at ~5 Hz for the time overlay
   useEffect(() => {
     if (!playing) return;
-    let raf: number;
-    const tick = (time: number) => {
-      if (lastTimeRef.current === 0) lastTimeRef.current = time;
-      const dt = time - lastTimeRef.current;
-      if (dt >= 1000 / sceneData.fps) {
-        lastTimeRef.current = time;
-        frameRef.current = (frameRef.current + 1) % sceneData.totalFrames;
-        setFrameIndex(frameRef.current);
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => {
-      cancelAnimationFrame(raf);
-      lastTimeRef.current = 0;
-    };
-  }, [playing, sceneData.fps, sceneData.totalFrames]);
+    let rafId: number;
+    let lastAdvance = 0;
+    let lastDisplayUpdate = 0;
+    const frameInterval = 1000 / Math.max(1, sceneData.fps);
 
-  const currentFrame: FrameData | null = sceneData.frames[frameIndex] ?? null;
-  const currentTime = (frameIndex / sceneData.fps).toFixed(1);
+    const tick = (now: number) => {
+      if (!lastAdvance) lastAdvance = now;
+      if (!lastDisplayUpdate) lastDisplayUpdate = now;
+
+      // Advance frame at the scene's native fps
+      if (now - lastAdvance >= frameInterval) {
+        frameRef.current = (frameRef.current + 1) % sceneData.totalFrames;
+        frameHolder.current = sceneData.frames[frameRef.current] ?? null;
+        lastAdvance = now;
+      }
+
+      // Update time display at ~5 Hz (every 200ms)
+      if (now - lastDisplayUpdate >= 200) {
+        setDisplayTime((frameRef.current / sceneData.fps).toFixed(1));
+        lastDisplayUpdate = now;
+      }
+
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [playing, sceneData.fps, sceneData.totalFrames, sceneData.frames, frameHolder]);
 
   const restart = useCallback(() => {
     frameRef.current = 0;
-    setFrameIndex(0);
-  }, []);
+    frameHolder.current = sceneData.frames[0] ?? null;
+    setDisplayTime("0.0");
+  }, [sceneData, frameHolder]);
 
   return (
     <div style={{
@@ -267,7 +279,7 @@ function VariantTile({
       />
 
       <div style={{ flex: 1, position: "relative", background: colors.bgDeep, minHeight: 0 }}>
-        <Scene3D frameOverride={currentFrame} />
+        <Scene3D frameOverrideHolder={frameHolder} lite />
 
         {/* Colored border highlight */}
         <div style={{
@@ -285,7 +297,7 @@ function VariantTile({
           padding: "2px 8px", borderRadius: 4,
           pointerEvents: "none",
         }}>
-          {currentTime}s / {sceneData.totalSeconds.toFixed(1)}s
+          {displayTime}s / {sceneData.totalSeconds.toFixed(1)}s
         </div>
 
         {/* Metrics overlay */}

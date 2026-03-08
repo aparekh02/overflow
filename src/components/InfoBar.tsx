@@ -51,7 +51,7 @@ export default function InfoBar() {
           color: colors.textPrimary,
           letterSpacing: "0.6px",
         }}>
-          OpenENV
+          Overflow
         </span>
         <span style={{
           fontSize: 10, fontWeight: 500,

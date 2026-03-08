@@ -20,7 +20,7 @@ import EgoVehicle from "./EgoVehicle";
 import { useStore } from "../store";
 import { colors } from "../theme";
 import type { FrameData } from "../mockData";
-import { FrameOverrideContext } from "./FrameOverrideContext";
+import { FrameOverrideContext, type FrameOverrideHolder } from "./FrameOverrideContext";
 
 // ---------------------------------------------------------------------------
 // Scene offset type — used by counterfactual tiles in the dashboard
@@ -117,25 +117,27 @@ function SceneContent({
   offset,
   trail,
   trailColor,
-  frameOverride,
+  frameOverrideHolder,
+  lite,
 }: {
   offset: SceneOffset | null;
   trail: [number, number, number][] | null;
   trailColor: string;
-  frameOverride: FrameData | null;
+  frameOverrideHolder: FrameOverrideHolder | null;
+  lite: boolean;
 }) {
   const showGrid = useStore((s) => s.showGrid);
 
   return (
-    <FrameOverrideContext.Provider value={frameOverride}>
+    <FrameOverrideContext.Provider value={frameOverrideHolder}>
       <ambientLight intensity={0.35} />
       <directionalLight position={[50, -30, 80]} intensity={0.9} />
-      <directionalLight position={[-30, 40, 20]} intensity={0.35} />
+      {!lite && <directionalLight position={[-30, 40, 20]} intensity={0.35} />}
 
       {/* World group — smoothly shifted for counterfactual perspective */}
       <OffsetGroup offset={offset}>
-        <PointCloud />
-        <BoundingBoxes />
+        <PointCloud lite={lite} />
+        <BoundingBoxes lite={lite} />
       </OffsetGroup>
 
       {/* Ego stays at origin regardless of offset */}
@@ -146,8 +148,8 @@ function SceneContent({
         <CounterfactualTrail trail={trail} trailColor={trailColor} />
       )}
 
-      {/* Ground grid */}
-      {showGrid && (
+      {/* Ground grid — skip in lite mode */}
+      {showGrid && !lite && (
         <gridHelper
           args={[300, 60, "#1E2440", "#161A30"]}
           rotation={[Math.PI / 2, 0, 0]}
@@ -165,12 +167,14 @@ function SceneContent({
         rotateSpeed={0.6}
       />
 
-      <GizmoHelper alignment="bottom-right" margin={[56, 72]}>
-        <GizmoViewport
-          axisColors={[colors.gizmoX, colors.gizmoY, colors.gizmoZ]}
-          labelColor="white"
-        />
-      </GizmoHelper>
+      {!lite && (
+        <GizmoHelper alignment="bottom-right" margin={[56, 72]}>
+          <GizmoViewport
+            axisColors={[colors.gizmoX, colors.gizmoY, colors.gizmoZ]}
+            labelColor="white"
+          />
+        </GizmoHelper>
+      )}
     </FrameOverrideContext.Provider>
   );
 }
@@ -184,12 +188,26 @@ export default function Scene3D({
   trail,
   trailColor = "#00e89d",
   frameOverride,
+  frameOverrideHolder,
+  lite = false,
 }: {
   offset?: SceneOffset;
   trail?: [number, number, number][];
   trailColor?: string;
+  /** @deprecated Use frameOverrideHolder for smooth playback */
   frameOverride?: FrameData | null;
+  /** Mutable ref holder — updated without React re-renders for smooth playback */
+  frameOverrideHolder?: FrameOverrideHolder;
+  /** Lite mode: reduces point density and skips gizmo/grid for perf in dashboard tiles */
+  lite?: boolean;
 }) {
+  // If caller passes raw frameOverride (legacy), wrap it in a holder
+  const legacyHolder = useRef<FrameOverrideHolder>({ current: null });
+  if (!frameOverrideHolder && frameOverride !== undefined) {
+    legacyHolder.current.current = frameOverride ?? null;
+  }
+  const holder = frameOverrideHolder ?? (frameOverride !== undefined ? legacyHolder.current : null);
+
   return (
     <div style={{ position: "absolute", inset: 0 }}>
       <Canvas
@@ -200,17 +218,24 @@ export default function Scene3D({
           far: 600,
           up: [0, 0, 1],
         }}
-        gl={{ antialias: false, powerPreference: "high-performance" }}
+        gl={{
+          antialias: false,
+          powerPreference: "high-performance",
+          ...(lite ? { precision: "lowp" as const } : {}),
+        }}
+        frameloop="always"
         style={{ width: "100%", height: "100%" }}
         onCreated={({ gl }) => {
           gl.setClearColor("#080B14");
+          if (lite) gl.setPixelRatio(Math.min(window.devicePixelRatio, 1));
         }}
       >
         <SceneContent
           offset={offset ?? null}
           trail={trail ?? null}
           trailColor={trailColor}
-          frameOverride={frameOverride ?? null}
+          frameOverrideHolder={holder}
+          lite={lite}
         />
       </Canvas>
     </div>
