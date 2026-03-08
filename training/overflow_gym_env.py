@@ -4,14 +4,15 @@ Gymnasium wrapper around OverflowEnvironment.
 Bridges the gap between OverflowEnvironment (text actions, structured obs)
 and our PPO trainer (continuous actions, numeric obs vector).
 
-Observation: 603-dim float32 vector (same layout as CarEnv3D — ego state +
-             collision-risk ticket matrix built from nearby cars)
+Observation: 603-dim float32 vector (ego state + per-car incident tickets)
 
 Action:      [steer, throttle, brake] all in [-1, 1]
              → mapped to text decision for OverflowEnvironment
 
-This makes OverflowEnvironment a drop-in replacement for CarEnv3D so that
-FlatMLPPolicy and TicketAttentionPolicy train with the exact same PPO loop.
+Reward:      incident-response grading — every step classifies the scene
+             into an incident type and scores the action against it.
+             This produces large, directional reward signals rather than
+             diffuse per-step shaping.
 """
 
 from __future__ import annotations
@@ -25,10 +26,8 @@ from gymnasium import spaces
 
 from ..server.overflow_environment import OverflowEnvironment
 from ..models import OverflowAction
-from ..policies.policy_spec import (
-    build_obs, build_ticket_vector, OBS_DIM,
-)
-from .reward import compute_reward
+from ..policies.policy_spec import build_obs, build_ticket_vector, OBS_DIM
+from .reward import compute_reward, compute_episode_bonus, IncidentType
 
 
 # ── Action mapping ────────────────────────────────────────────────────────────
@@ -61,7 +60,7 @@ def _obs_to_vector(overflow_obs) -> np.ndarray:
     for car in cars:
         if car.carId == 0:
             continue
-        rel_x    = car.position.x - ego.position.x
+        rel_x    = car.position.x - ego_x
         rel_y    = (car.lane - ego.lane) * 3.7
         car_spd  = car.speed / 4.5
         distance = math.sqrt(rel_x ** 2 + rel_y ** 2)
@@ -96,8 +95,7 @@ def _obs_to_vector(overflow_obs) -> np.ndarray:
 class OverflowGymEnv(gym.Env):
     """
     Gymnasium-compatible wrapper around OverflowEnvironment.
-
-    Provides the same interface as CarEnv3D so PPOTrainer works unchanged.
+    Uses incident-response grading for rewards.
     """
 
     metadata = {"render_modes": []}
@@ -107,11 +105,11 @@ class OverflowGymEnv(gym.Env):
         self._env = OverflowEnvironment()
         self._last_overflow_obs = None
         self._prev_action = np.zeros(3, dtype=np.float32)
-        self._sim_time = 0.0         # incremented each step (mirrors CarEnv3D._sim_time)
-        self._step_dt  = 0.1         # seconds per step
+        self._sim_time = 0.0
+        self._step_dt  = 0.1
 
         self.observation_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(OBS_DIM,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(OBS_DIM,), dtype=np.float32
         )
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(3,), dtype=np.float32
@@ -137,24 +135,38 @@ class OverflowGymEnv(gym.Env):
 
         obs_vec = _obs_to_vector(overflow_obs)
 
-        # Extract signals for reward shaping
+        # Extract ego state
         ego = next((c for c in overflow_obs.cars if c.carId == 0), None)
         ego_speed_ms = (ego.speed / 4.5) if ego else 0.0
-        ego_y        = ((ego.lane - 2) * 3.7) if ego else 0.0
+        ego_x        = ego.position.x if ego else 0.0
+        ego_lane     = ego.lane if ego else 2
+        ego_y        = (ego_lane - 2) * 3.7
 
-        collision    = any("CRASH" in p for p in (overflow_obs.incident_report or "").split("\n")
-                           if "Car 0" in p)
+        collision    = any(
+            "CRASH" in line and "Car 0" in line
+            for line in (overflow_obs.incident_report or "").split("\n")
+        )
         goal_reached = overflow_obs.done and not collision
 
-        reward = compute_reward(
+        # Goal position — read from env internals (Car 0's goal_position)
+        goal_x = 180.0  # default fallback
+        if hasattr(self._env, "_cars") and self._env._cars:
+            agent_car = next((c for c in self._env._cars if c.car_id == 0), None)
+            if agent_car:
+                goal_x = agent_car.goal_position
+
+        reward, incident_ctx, grade_desc = compute_reward(
             ego_speed    = ego_speed_ms,
+            ego_x        = ego_x,
+            ego_lane     = ego_lane,
             ego_y        = ego_y,
+            decision     = decision,
             action       = action,
             prev_action  = self._prev_action,
             collision    = collision,
             goal_reached = goal_reached,
-            near_miss    = "NEAR MISS" in (overflow_obs.incident_report or ""),
-            raw_reward   = overflow_obs.reward or 0.0,
+            cars         = overflow_obs.cars,
+            goal_x       = goal_x,
         )
 
         self._prev_action = action.copy()
@@ -162,9 +174,13 @@ class OverflowGymEnv(gym.Env):
         terminated = overflow_obs.done
         truncated  = False
         info: Dict[str, Any] = {
-            "collision":    collision,
-            "goal_reached": goal_reached,
-            "incident":     overflow_obs.incident_report,
+            "collision":      collision,
+            "goal_reached":   goal_reached,
+            "incident":       overflow_obs.incident_report,
+            "incident_type":  incident_ctx.incident_type.value,
+            "decision":       decision,
+            "grade_desc":     grade_desc,
+            "reward":         reward,
         }
 
         return obs_vec, reward, terminated, truncated, info

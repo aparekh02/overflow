@@ -1,16 +1,20 @@
 """
-Overflow OpenENV — Continuous PPO Training + Live Web Dashboard
+Overflow OpenENV — Continuous PPO Training + Live Incident Management Dashboard
 
-Runs PPO training in a background thread and exposes:
-  GET /          → live HTML dashboard (road animation + reward charts)
-  GET /api/state → JSON snapshot of current training state
-  GET /api/stream → SSE stream of state updates
-  POST /api/mode  → switch reward mode {capped, uncapped}
+Training loop runs in a background thread.
+Every step:
+  - Classifies the scene into an incident type
+  - Grades the agent's action against that incident
+  - Records the incident in a live feed
 
-Reward modes:
-  capped   — standard shaped reward, capped at REWARD_CAP per step
-  uncapped — base reward + token_bonus (scales with LLM reasoning token count)
-             frontier models that produce more reasoning tokens earn more reward
+Dashboard:
+  Left:  2D road canvas + live incident feed (step-by-step decisions)
+  Right: Episode reward curve + incident response accuracy chart
+
+GET  /         → HTML dashboard
+GET  /api/state → JSON snapshot
+GET  /api/stream → SSE (0.5s heartbeats + episode/incident events)
+POST /api/mode  → switch reward mode {capped, uncapped}
 """
 
 from __future__ import annotations
@@ -31,34 +35,32 @@ import torch
 
 # ── Absolute-import fallback ──────────────────────────────────────────────────
 try:
-    from ..training.overflow_gym_env import OverflowGymEnv, _obs_to_vector, _action_to_decision
-    from ..training.curriculum import CurriculumManager, STAGES
-    from ..training.reward import compute_reward, compute_episode_bonus, W_COLLISION
-    from ..training.ppo_trainer import PPOTrainer, RolloutBuffer
-    from ..policies.flat_mlp_policy import FlatMLPPolicy
+    from ..training.overflow_gym_env import OverflowGymEnv
+    from ..training.curriculum import CurriculumManager
+    from ..training.reward import compute_episode_bonus, IncidentType
+    from ..training.ppo_trainer import RolloutBuffer
     from ..policies.ticket_attention_policy import TicketAttentionPolicy
     from ..policies.policy_spec import OBS_DIM
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from training.overflow_gym_env import OverflowGymEnv, _obs_to_vector, _action_to_decision
-    from training.curriculum import CurriculumManager, STAGES
-    from training.reward import compute_reward, compute_episode_bonus, W_COLLISION
-    from training.ppo_trainer import PPOTrainer, RolloutBuffer
-    from policies.flat_mlp_policy import FlatMLPPolicy
+    from training.overflow_gym_env import OverflowGymEnv
+    from training.curriculum import CurriculumManager
+    from training.reward import compute_episode_bonus, IncidentType
+    from training.ppo_trainer import RolloutBuffer
     from policies.ticket_attention_policy import TicketAttentionPolicy
     from policies.policy_spec import OBS_DIM
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 # ── Reward mode config ────────────────────────────────────────────────────────
 
-REWARD_CAP     = 2.0          # per-step ceiling in capped mode
-TOKEN_SCALE    = 0.001        # uncapped: reward += tokens * TOKEN_SCALE
-MAX_TOKEN_BONUS = 5.0         # uncapped mode bonus ceiling per step
+REWARD_CAP      =  8.0    # capped mode: ceiling per step (matches max correct response)
+TOKEN_SCALE     =  0.002  # uncapped: reward += tokens * TOKEN_SCALE
+MAX_TOKEN_BONUS = 10.0    # uncapped mode max bonus per step
 
-# ── Shared training state (updated by training thread, read by API) ───────────
+# ── Shared state ──────────────────────────────────────────────────────────────
 
 @dataclass
 class CarSnapshot:
@@ -69,48 +71,71 @@ class CarSnapshot:
     speed: float
 
 @dataclass
-class EpisodeRecord:
+class IncidentEvent:
+    step: int
     episode: int
-    steps: int
+    incident_type: str
+    decision: str
     reward: float
-    outcome: str   # "crash" | "goal" | "timeout"
-    stage: int
-    reward_mode: str
+    grade_desc: str
 
 @dataclass
 class TrainingState:
-    # Current frame
-    cars: List[CarSnapshot] = field(default_factory=list)
-    ego_x: float = 0.0
-    ego_lane: int = 2
-    # Live metrics
-    total_steps: int = 0
-    n_updates: int = 0
-    n_episodes: int = 0
-    episode_reward: float = 0.0
-    episode_steps: int = 0
-    mean_reward_100: float = 0.0
-    mean_ep_len: float = 0.0
-    stage: int = 1
-    stage_name: str = "Survival"
-    reward_mode: str = "capped"
-    steps_per_sec: float = 0.0
-    # History (capped at 500 for the chart)
-    reward_history: List[float] = field(default_factory=list)
-    episode_history: List[Dict] = field(default_factory=list)
-    # PPO update metrics
-    last_pg_loss: float = 0.0
-    last_vf_loss: float = 0.0
-    last_entropy: float = 0.0
-    running: bool = True
-    error: Optional[str] = None
+    # Road
+    cars: List[CarSnapshot]      = field(default_factory=list)
+    ego_x: float                 = 0.0
+    ego_lane: int                = 2
+    goal_x: float                = 180.0
+    # Training metrics
+    total_steps: int             = 0
+    n_updates: int               = 0
+    n_episodes: int              = 0
+    episode_reward: float        = 0.0
+    episode_steps: int           = 0
+    mean_reward_100: float       = 0.0
+    mean_ep_len: float           = 0.0
+    stage: int                   = 1
+    stage_name: str              = "Survival"
+    reward_mode: str             = "capped"
+    # Incident stats
+    incident_feed: List[Dict]    = field(default_factory=list)   # last 100 events
+    incident_counts: Dict        = field(default_factory=dict)   # {type: count}
+    correct_responses: int       = 0
+    total_responses: int         = 0
+    # History for charts
+    reward_history: List[float]  = field(default_factory=list)   # per-episode cumulative
+    accuracy_history: List[float]= field(default_factory=list)   # per-episode correct%
+    episode_history: List[Dict]  = field(default_factory=list)
+    # PPO
+    last_pg_loss: float          = 0.0
+    last_vf_loss: float          = 0.0
+    last_entropy: float          = 0.0
+    running: bool                = True
+    error: Optional[str]         = None
 
 
-_state = TrainingState()
+_state      = TrainingState()
 _state_lock = threading.Lock()
-_sse_queue: Deque[str] = deque(maxlen=50)
+_sse_queue: Deque[str] = deque(maxlen=100)
 
-# ── Reward mode switch (thread-safe) ─────────────────────────────────────────
+# Per-episode counters (reset each episode)
+_ep_correct  = 0
+_ep_total    = 0
+
+# Which decisions count as "correct" for each incident type
+_CORRECT_RESPONSES: Dict[str, set] = {
+    IncidentType.CRASH_IMMINENT.value:   {"brake", "lane_change_left", "lane_change_right"},
+    IncidentType.NEAR_MISS_AHEAD.value:  {"brake", "lane_change_left", "lane_change_right"},
+    IncidentType.NEAR_MISS_SIDE.value:   {"brake", "maintain"},
+    IncidentType.BLOCKED_AHEAD.value:    {"brake", "lane_change_left", "lane_change_right"},
+    IncidentType.APPROACHING_GOAL.value: {"accelerate", "maintain"},
+    IncidentType.CLEAR_ROAD.value:       {"accelerate", "maintain"},
+}
+
+
+def _is_correct(incident_type: str, decision: str) -> bool:
+    return decision in _CORRECT_RESPONSES.get(incident_type, set())
+
 
 def get_reward_mode() -> str:
     with _state_lock:
@@ -126,70 +151,47 @@ def apply_reward_mode(base_reward: float, token_count: int = 0) -> float:
         bonus = min(token_count * TOKEN_SCALE, MAX_TOKEN_BONUS)
         return base_reward + bonus
     else:
+        # Only cap positive rewards — keep penalties intact
         return min(base_reward, REWARD_CAP) if base_reward > 0 else base_reward
-
-
-# ── Training thread ───────────────────────────────────────────────────────────
 
 def _push_sse(data: dict) -> None:
     _sse_queue.append(json.dumps(data))
 
-def _snapshot_cars(overflow_obs) -> List[CarSnapshot]:
-    snaps = []
-    if not overflow_obs or not overflow_obs.cars:
-        return snaps
-    for c in overflow_obs.cars:
-        snaps.append(CarSnapshot(
-            car_id=c.carId,
-            x=c.position.x,
-            y=c.position.y if hasattr(c.position, "y") else (c.lane - 2) * 3.7,
-            lane=c.lane,
-            speed=c.speed,
-        ))
-    return snaps
+
+# ── Training thread ───────────────────────────────────────────────────────────
 
 def _training_loop() -> None:
-    global _state
+    global _ep_correct, _ep_total
+
     try:
-        # Build policy + env + curriculum
-        policy = TicketAttentionPolicy(obs_dim=OBS_DIM)
-        env = OverflowGymEnv()
+        policy    = TicketAttentionPolicy(obs_dim=OBS_DIM)
+        env       = OverflowGymEnv()
         curriculum = CurriculumManager()
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         policy.to(device)
-
         optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4, eps=1e-5)
 
-        # PPO hyperparams
-        GAMMA      = 0.99
-        GAE_LAMBDA = 0.95
-        CLIP       = 0.2
-        ENT_COEF   = 0.02
-        VF_COEF    = 0.5
-        MAX_GRAD   = 0.5
-        N_STEPS    = 512
-        BATCH_SIZE = 128
-        N_EPOCHS   = 6
+        GAMMA = 0.99; GAE_LAMBDA = 0.95; CLIP = 0.2
+        ENT_COEF = 0.02; VF_COEF = 0.5; MAX_GRAD = 0.5
+        N_STEPS = 512; BATCH_SIZE = 128; N_EPOCHS = 6
 
         buf = RolloutBuffer(N_STEPS, OBS_DIM, device)
 
-        ep_rewards: Deque[float] = deque(maxlen=100)
-        ep_lengths: Deque[int]   = deque(maxlen=100)
+        ep_rewards:    deque = deque(maxlen=100)
+        ep_lengths:    deque = deque(maxlen=100)
+        ep_accuracies: deque = deque(maxlen=100)
 
         obs, _ = env.reset()
-        ep_reward = 0.0
-        ep_steps  = 0
-        total_steps = 0
-        n_updates = 0
-        n_episodes = 0
+        ep_reward = 0.0; ep_steps = 0
+        total_steps = 0; n_updates = 0; n_episodes = 0
+        _ep_correct = 0; _ep_total = 0
         t0 = time.time()
 
         while True:
             buf.reset()
             policy.eval()
 
-            # ── Collect rollout ──────────────────────────────────────────────
             for _ in range(N_STEPS):
                 curriculum.step(env._sim_time)
 
@@ -205,7 +207,6 @@ def _training_loop() -> None:
 
                 next_obs, base_reward, term, trunc, info = env.step(action.cpu().numpy())
 
-                # Apply reward mode
                 reward = apply_reward_mode(base_reward)
 
                 buf.add(obs, action.cpu().numpy(), reward, float(val), float(logp), float(term or trunc))
@@ -215,24 +216,48 @@ def _training_loop() -> None:
                 ep_steps  += 1
                 total_steps += 1
 
-                # Update live car positions from OverflowEnvironment._cars
+                # ── Incident tracking ────────────────────────────────────
+                inc_type = info.get("incident_type", "CLEAR_ROAD")
+                decision = info.get("decision", "maintain")
+                correct  = _is_correct(inc_type, decision)
+                _ep_correct += int(correct)
+                _ep_total   += 1
+
+                evt = {
+                    "step":          total_steps,
+                    "episode":       n_episodes + 1,
+                    "incident_type": inc_type,
+                    "decision":      decision,
+                    "reward":        round(reward, 2),
+                    "correct":       correct,
+                    "grade_desc":    info.get("grade_desc", ""),
+                }
+
+                # Pull car positions from env internals
                 cars = []
-                overflow_env = env._env  # OverflowEnvironment instance
-                if hasattr(overflow_env, "_cars"):
-                    for c in overflow_env._cars:
+                if hasattr(env._env, "_cars"):
+                    for c in env._env._cars:
                         cars.append(CarSnapshot(
-                            car_id=c.car_id,
-                            x=c.position,
-                            y=(c.lane - 2) * 3.7,
-                            lane=c.lane,
-                            speed=c.speed,
+                            car_id=c.car_id, x=c.position,
+                            y=(c.lane - 2) * 3.7, lane=c.lane, speed=c.speed,
                         ))
+                goal_x = 180.0
+                if hasattr(env._env, "_cars") and env._env._cars:
+                    agent_car = next((c for c in env._env._cars if c.car_id == 0), None)
+                    if agent_car:
+                        goal_x = agent_car.goal_position
 
                 with _state_lock:
-                    _state.total_steps = total_steps
-                    _state.episode_reward = ep_reward
-                    _state.episode_steps = ep_steps
-                    _state.steps_per_sec = total_steps / max(time.time() - t0, 1.0)
+                    _state.total_steps    = total_steps
+                    _state.episode_reward = round(ep_reward, 2)
+                    _state.episode_steps  = ep_steps
+                    _state.goal_x         = goal_x
+                    _state.correct_responses += int(correct)
+                    _state.total_responses   += 1
+                    _state.incident_counts[inc_type] = _state.incident_counts.get(inc_type, 0) + 1
+                    _state.incident_feed.append(evt)
+                    if len(_state.incident_feed) > 100:
+                        _state.incident_feed = _state.incident_feed[-100:]
                     if cars:
                         _state.cars = cars
                         ego = next((c for c in cars if c.car_id == 0), None)
@@ -240,40 +265,50 @@ def _training_loop() -> None:
                             _state.ego_x = ego.x
                             _state.ego_lane = ego.lane
 
+                # Push incident event to SSE (only threatening incidents or every 10 steps)
+                if inc_type not in (IncidentType.CLEAR_ROAD.value,) or total_steps % 10 == 0:
+                    _push_sse({"type": "incident", "data": evt})
+
+                # ── Episode end ──────────────────────────────────────────
                 if term or trunc:
                     bonus = compute_episode_bonus(
                         total_steps=ep_steps,
                         survived=not info.get("collision", False),
                     )
                     ep_reward += bonus
+                    n_episodes += 1
                     ep_rewards.append(ep_reward)
                     ep_lengths.append(ep_steps)
-                    n_episodes += 1
 
+                    acc = (_ep_correct / _ep_total * 100) if _ep_total > 0 else 0.0
+                    ep_accuracies.append(acc)
                     advanced = curriculum.record_episode_reward(ep_reward)
-                    outcome = (
-                        "crash" if info.get("collision") else
-                        ("goal" if info.get("goal_reached") else "timeout")
-                    )
 
+                    outcome = (
+                        "crash"   if info.get("collision")    else
+                        "goal"    if info.get("goal_reached") else "timeout"
+                    )
                     ep_rec = {
                         "episode":     n_episodes,
                         "steps":       ep_steps,
-                        "reward":      round(ep_reward, 3),
+                        "reward":      round(ep_reward, 2),
                         "outcome":     outcome,
                         "stage":       curriculum.current_stage,
+                        "accuracy":    round(acc, 1),
                         "reward_mode": get_reward_mode(),
                     }
 
                     with _state_lock:
-                        _state.n_episodes = n_episodes
-                        _state.stage = curriculum.current_stage
-                        _state.stage_name = curriculum.config.name
-                        _state.mean_reward_100 = float(np.mean(ep_rewards))
-                        _state.mean_ep_len = float(np.mean(ep_lengths))
-                        _state.reward_history.append(round(ep_reward, 3))
+                        _state.n_episodes       = n_episodes
+                        _state.stage            = curriculum.current_stage
+                        _state.stage_name       = curriculum.config.name
+                        _state.mean_reward_100  = round(float(np.mean(ep_rewards)), 2)
+                        _state.mean_ep_len      = round(float(np.mean(ep_lengths)), 1)
+                        _state.reward_history.append(round(ep_reward, 2))
+                        _state.accuracy_history.append(round(acc, 1))
                         if len(_state.reward_history) > 500:
-                            _state.reward_history = _state.reward_history[-500:]
+                            _state.reward_history   = _state.reward_history[-500:]
+                            _state.accuracy_history = _state.accuracy_history[-500:]
                         _state.episode_history.append(ep_rec)
                         if len(_state.episode_history) > 200:
                             _state.episode_history = _state.episode_history[-200:]
@@ -281,167 +316,155 @@ def _training_loop() -> None:
                     _push_sse({"type": "episode", "data": ep_rec})
 
                     obs, _ = env.reset()
-                    ep_reward = 0.0
-                    ep_steps  = 0
+                    ep_reward = 0.0; ep_steps = 0
+                    _ep_correct = 0; _ep_total = 0
 
-            # ── PPO update ───────────────────────────────────────────────────
+            # ── PPO update ────────────────────────────────────────────────
             with torch.no_grad():
                 obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device)
                 _, last_val = policy(obs_t.unsqueeze(0))
             buf.compute_returns(float(last_val), GAMMA, GAE_LAMBDA)
 
             policy.train()
-
-            all_obs      = buf.obs
-            all_acts     = buf.acts
-            old_logp     = buf.logp
-            adv          = buf.ret - buf.val
-            adv          = (adv - adv.mean()) / (adv.std() + 1e-8)
-            ret          = buf.ret
-            old_val      = buf.val
-            indices      = torch.randperm(N_STEPS, device=device)
-
-            pg_losses, vf_losses, entropies = [], [], []
+            all_obs  = buf.obs;  all_acts = buf.acts;  old_logp = buf.logp
+            adv      = buf.ret - buf.val
+            adv      = (adv - adv.mean()) / (adv.std() + 1e-8)
+            ret      = buf.ret;  old_val  = buf.val
+            indices  = torch.randperm(N_STEPS, device=device)
+            pg_ls, vf_ls, ents = [], [], []
 
             for _ in range(N_EPOCHS):
                 for start in range(0, N_STEPS, BATCH_SIZE):
-                    idx = indices[start: start + BATCH_SIZE]
-                    act_mean, val = policy(all_obs[idx])
-                    val = val.squeeze(-1)
-
-                    dist     = torch.distributions.Normal(act_mean, torch.ones_like(act_mean) * 0.3)
-                    logp     = dist.log_prob(all_acts[idx]).sum(dim=-1)
-                    entropy  = dist.entropy().sum(dim=-1).mean()
-
-                    ratio    = torch.exp(logp - old_logp[idx])
-                    pg_loss  = torch.max(-adv[idx] * ratio, -adv[idx] * ratio.clamp(1 - CLIP, 1 + CLIP)).mean()
-
-                    val_clip = old_val[idx] + (val - old_val[idx]).clamp(-CLIP, CLIP)
-                    vf_loss  = 0.5 * torch.max((val - ret[idx]) ** 2, (val_clip - ret[idx]) ** 2).mean()
-
-                    loss = pg_loss + VF_COEF * vf_loss - ENT_COEF * entropy
-                    optimizer.zero_grad()
-                    loss.backward()
+                    idx     = indices[start: start + BATCH_SIZE]
+                    am, val = policy(all_obs[idx])
+                    val     = val.squeeze(-1)
+                    dist    = torch.distributions.Normal(am, torch.ones_like(am) * 0.3)
+                    logp    = dist.log_prob(all_acts[idx]).sum(dim=-1)
+                    ent     = dist.entropy().sum(dim=-1).mean()
+                    ratio   = torch.exp(logp - old_logp[idx])
+                    pg_loss = torch.max(-adv[idx]*ratio, -adv[idx]*ratio.clamp(1-CLIP, 1+CLIP)).mean()
+                    vc      = old_val[idx] + (val - old_val[idx]).clamp(-CLIP, CLIP)
+                    vf_loss = 0.5*torch.max((val-ret[idx])**2, (vc-ret[idx])**2).mean()
+                    loss    = pg_loss + VF_COEF*vf_loss - ENT_COEF*ent
+                    optimizer.zero_grad(); loss.backward()
                     torch.nn.utils.clip_grad_norm_(policy.parameters(), MAX_GRAD)
                     optimizer.step()
-
-                    pg_losses.append(float(pg_loss))
-                    vf_losses.append(float(vf_loss))
-                    entropies.append(float(entropy))
+                    pg_ls.append(float(pg_loss)); vf_ls.append(float(vf_loss)); ents.append(float(ent))
 
             n_updates += 1
             with _state_lock:
-                _state.n_updates     = n_updates
-                _state.last_pg_loss  = round(float(np.mean(pg_losses)), 5)
-                _state.last_vf_loss  = round(float(np.mean(vf_losses)), 5)
-                _state.last_entropy  = round(float(np.mean(entropies)), 5)
+                _state.n_updates    = n_updates
+                _state.last_pg_loss = round(float(np.mean(pg_ls)), 5)
+                _state.last_vf_loss = round(float(np.mean(vf_ls)), 5)
+                _state.last_entropy = round(float(np.mean(ents)), 5)
+                _state.steps_per_sec = round(total_steps / max(time.time() - t0, 1.0), 1)
 
-            _push_sse({
-                "type": "update",
-                "data": {
-                    "n_updates":   n_updates,
-                    "total_steps": total_steps,
-                    "mean_reward": round(float(np.mean(ep_rewards)) if ep_rewards else 0.0, 3),
-                    "stage":       curriculum.current_stage,
-                    "pg_loss":     round(float(np.mean(pg_losses)), 5),
-                    "vf_loss":     round(float(np.mean(vf_losses)), 5),
-                    "entropy":     round(float(np.mean(entropies)), 5),
-                }
-            })
+            _push_sse({"type": "update", "data": {
+                "n_updates": n_updates, "total_steps": total_steps,
+                "mean_reward": round(float(np.mean(ep_rewards)) if ep_rewards else 0.0, 2),
+                "stage": curriculum.current_stage,
+                "pg_loss": round(float(np.mean(pg_ls)), 5),
+                "vf_loss": round(float(np.mean(vf_ls)), 5),
+                "entropy": round(float(np.mean(ents)), 5),
+            }})
 
     except Exception as exc:
         import traceback
         tb = traceback.format_exc()
         with _state_lock:
             _state.running = False
-            _state.error = f"{exc}\n\n{tb}"
-        print(f"[Training] ERROR: {exc}\n{tb}", flush=True)
+            _state.error   = f"{exc}\n\n{tb}"
+        print(f"[Training] FATAL: {exc}\n{tb}", flush=True)
 
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
+# ── FastAPI ───────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Overflow OpenENV")
 
 @app.on_event("startup")
 def _start_training():
-    t = threading.Thread(target=_training_loop, daemon=True)
-    t.start()
-
+    threading.Thread(target=_training_loop, daemon=True).start()
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-
 class ModeRequest(BaseModel):
-    mode: str   # "capped" or "uncapped"
+    mode: str
 
 @app.post("/api/mode")
 def set_mode(req: ModeRequest):
     if req.mode not in ("capped", "uncapped"):
-        return JSONResponse({"error": "mode must be 'capped' or 'uncapped'"}, status_code=400)
+        return {"error": "mode must be capped or uncapped"}
     set_reward_mode(req.mode)
     return {"mode": req.mode}
-
 
 @app.get("/api/state")
 def get_state():
     with _state_lock:
         s = _state
+        acc = round(s.correct_responses / s.total_responses * 100, 1) if s.total_responses > 0 else 0.0
         return {
-            "total_steps":    s.total_steps,
-            "n_updates":      s.n_updates,
-            "n_episodes":     s.n_episodes,
-            "episode_reward": round(s.episode_reward, 3),
-            "episode_steps":  s.episode_steps,
-            "mean_reward":    round(s.mean_reward_100, 3),
-            "mean_ep_len":    round(s.mean_ep_len, 1),
-            "stage":          s.stage,
-            "stage_name":     s.stage_name,
-            "reward_mode":    s.reward_mode,
-            "steps_per_sec":  round(s.steps_per_sec, 1),
-            "pg_loss":        s.last_pg_loss,
-            "vf_loss":        s.last_vf_loss,
-            "entropy":        s.last_entropy,
-            "reward_history": s.reward_history[-200:],
-            "episode_history": s.episode_history[-50:],
-            "cars":           [asdict(c) for c in s.cars],
-            "ego_x":          s.ego_x,
-            "ego_lane":       s.ego_lane,
-            "running":        s.running,
-            "error":          s.error,
+            "total_steps":       s.total_steps,
+            "n_updates":         s.n_updates,
+            "n_episodes":        s.n_episodes,
+            "episode_reward":    s.episode_reward,
+            "episode_steps":     s.episode_steps,
+            "mean_reward":       s.mean_reward_100,
+            "mean_ep_len":       s.mean_ep_len,
+            "stage":             s.stage,
+            "stage_name":        s.stage_name,
+            "reward_mode":       s.reward_mode,
+            "steps_per_sec":     s.steps_per_sec if hasattr(s, "steps_per_sec") else 0,
+            "pg_loss":           s.last_pg_loss,
+            "vf_loss":           s.last_vf_loss,
+            "entropy":           s.last_entropy,
+            "reward_history":    s.reward_history[-300:],
+            "accuracy_history":  s.accuracy_history[-300:],
+            "episode_history":   s.episode_history[-50:],
+            "incident_feed":     s.incident_feed[-30:],
+            "incident_counts":   s.incident_counts,
+            "response_accuracy": acc,
+            "cars":              [asdict(c) for c in s.cars],
+            "ego_x":             s.ego_x,
+            "ego_lane":          s.ego_lane,
+            "goal_x":            s.goal_x,
+            "running":           s.running,
+            "error":             s.error,
         }
-
 
 @app.get("/api/stream")
 async def sse_stream():
-    async def generator():
+    async def gen():
         last_idx = len(_sse_queue)
         while True:
             current = list(_sse_queue)
             for msg in current[last_idx:]:
                 yield f"data: {msg}\n\n"
             last_idx = len(current)
-            # Also send a heartbeat state snapshot every 2s
+
             with _state_lock:
                 s = _state
+                acc = round(s.correct_responses / s.total_responses * 100, 1) if s.total_responses > 0 else 0.0
                 snap = {
                     "type": "tick",
                     "data": {
-                        "total_steps":    s.total_steps,
-                        "episode_reward": round(s.episode_reward, 3),
-                        "episode_steps":  s.episode_steps,
-                        "stage":          s.stage,
-                        "stage_name":     s.stage_name,
-                        "reward_mode":    s.reward_mode,
-                        "cars":           [asdict(c) for c in s.cars],
-                        "ego_x":          s.ego_x,
+                        "total_steps":       s.total_steps,
+                        "episode_reward":    s.episode_reward,
+                        "episode_steps":     s.episode_steps,
+                        "stage":             s.stage,
+                        "stage_name":        s.stage_name,
+                        "reward_mode":       s.reward_mode,
+                        "response_accuracy": acc,
+                        "cars":              [asdict(c) for c in s.cars],
+                        "ego_x":             s.ego_x,
+                        "goal_x":            s.goal_x,
                     }
                 }
             yield f"data: {json.dumps(snap)}\n\n"
             await asyncio.sleep(0.5)
 
-    return StreamingResponse(generator(), media_type="text/event-stream")
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 # ── HTML Dashboard ────────────────────────────────────────────────────────────
@@ -450,424 +473,422 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Overflow OpenENV — Live Training</title>
+<title>Overflow OpenENV — Incident Management Training</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #0a0a0f; color: #e0e0e0; font-family: 'Courier New', monospace; height: 100vh; display: flex; flex-direction: column; }
-  header { background: #12121a; border-bottom: 1px solid #2a2a40; padding: 10px 20px; display: flex; align-items: center; gap: 16px; }
-  header h1 { font-size: 16px; color: #7eb8ff; letter-spacing: 2px; }
-  .badge { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: bold; }
-  .badge-running { background: #1a3a1a; color: #4caf50; border: 1px solid #4caf50; }
-  .badge-error { background: #3a1a1a; color: #f44336; border: 1px solid #f44336; }
-  .mode-toggle { margin-left: auto; display: flex; gap: 8px; align-items: center; }
-  .mode-btn { padding: 4px 14px; border-radius: 8px; border: 1px solid #444; background: #1a1a2a; color: #aaa; cursor: pointer; font-size: 12px; transition: all 0.2s; }
-  .mode-btn.active { background: #1a3a5a; color: #7eb8ff; border-color: #7eb8ff; }
-  main { flex: 1; display: flex; gap: 0; overflow: hidden; }
-  .left-panel { flex: 0 0 55%; display: flex; flex-direction: column; padding: 16px; gap: 12px; border-right: 1px solid #2a2a40; overflow: hidden; }
-  .right-panel { flex: 1; display: flex; flex-direction: column; padding: 16px; gap: 12px; overflow: hidden; }
-  .panel-title { font-size: 11px; color: #667; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 4px; }
-  canvas { border-radius: 8px; }
-  #road-canvas { width: 100%; height: 200px; background: #111118; border: 1px solid #2a2a40; border-radius: 8px; }
-  .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-  .metric-card { background: #12121a; border: 1px solid #2a2a40; border-radius: 8px; padding: 10px; }
-  .metric-label { font-size: 10px; color: #667; text-transform: uppercase; letter-spacing: 1px; }
-  .metric-value { font-size: 18px; color: #7eb8ff; font-weight: bold; margin-top: 2px; }
-  .metric-sub { font-size: 10px; color: #556; margin-top: 2px; }
-  .stage-bar { background: #12121a; border: 1px solid #2a2a40; border-radius: 8px; padding: 12px; }
-  .stage-stages { display: flex; gap: 6px; margin-top: 8px; }
-  .stage-pip { flex: 1; height: 6px; border-radius: 3px; background: #2a2a40; transition: background 0.5s; }
-  .stage-pip.active { background: #7eb8ff; }
-  .stage-pip.done { background: #4caf50; }
-  #reward-canvas { width: 100%; flex: 1; min-height: 160px; background: #12121a; border: 1px solid #2a2a40; border-radius: 8px; }
-  .episode-table { flex: 1; overflow-y: auto; background: #12121a; border: 1px solid #2a2a40; border-radius: 8px; min-height: 0; }
-  table { width: 100%; border-collapse: collapse; font-size: 11px; }
-  th { padding: 6px 10px; color: #667; text-align: left; border-bottom: 1px solid #2a2a40; position: sticky; top: 0; background: #1a1a28; }
-  td { padding: 5px 10px; border-bottom: 1px solid #1a1a28; }
-  tr:hover td { background: #1a1a2a; }
-  .outcome-crash { color: #f44336; }
-  .outcome-goal  { color: #4caf50; }
-  .outcome-timeout { color: #ff9800; }
-  .ppo-row { display: flex; gap: 8px; flex-wrap: wrap; }
-  .ppo-stat { background: #12121a; border: 1px solid #2a2a40; border-radius: 6px; padding: 6px 12px; font-size: 11px; }
-  .ppo-stat span { color: #7eb8ff; }
-  .error-box { background: #2a0a0a; border: 1px solid #f44336; border-radius: 8px; padding: 12px; font-size: 11px; color: #f44336; white-space: pre-wrap; overflow-y: auto; max-height: 200px; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #08080f; color: #ddd; font-family: 'Courier New', monospace; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+header { background: #101018; border-bottom: 1px solid #252535; padding: 8px 18px; display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+header h1 { font-size: 13px; color: #7eb8ff; letter-spacing: 3px; }
+.badge { padding: 2px 9px; border-radius: 10px; font-size: 10px; font-weight: bold; }
+.badge-ok  { background:#0e2a0e; color:#4caf50; border:1px solid #4caf50; }
+.badge-err { background:#2a0e0e; color:#f44336; border:1px solid #f44336; }
+.mode-row { margin-left:auto; display:flex; gap:6px; align-items:center; }
+.mbtn { padding:3px 12px; border-radius:7px; border:1px solid #333; background:#151522; color:#888; cursor:pointer; font-size:11px; }
+.mbtn.on { background:#0e2a40; color:#7eb8ff; border-color:#7eb8ff; }
+
+main { flex:1; display:flex; min-height:0; }
+
+/* LEFT */
+.left { flex: 0 0 54%; display:flex; flex-direction:column; border-right:1px solid #252535; min-height:0; }
+.road-wrap { flex:0 0 170px; padding:10px 12px 0; }
+.road-wrap canvas { width:100%; height:150px; display:block; background:#111118; border:1px solid #252535; border-radius:6px; }
+
+.metrics-row { flex:0 0 auto; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; padding:8px 12px; }
+.mc { background:#101018; border:1px solid #252535; border-radius:6px; padding:8px; }
+.mc-label { font-size:9px; color:#556; text-transform:uppercase; letter-spacing:1px; }
+.mc-val { font-size:16px; color:#7eb8ff; font-weight:bold; margin-top:1px; }
+.mc-sub { font-size:9px; color:#445; margin-top:1px; }
+
+.stage-row { flex:0 0 auto; padding:0 12px 6px; }
+.stage-inner { background:#101018; border:1px solid #252535; border-radius:6px; padding:8px 10px; }
+.stage-title { font-size:9px; color:#556; letter-spacing:2px; text-transform:uppercase; }
+.stage-name { font-size:12px; color:#7eb8ff; margin-top:2px; }
+.pips { display:flex; gap:5px; margin-top:6px; }
+.pip { flex:1; height:5px; border-radius:3px; background:#252535; transition:background .4s; }
+.pip.done { background:#4caf50; }
+.pip.active { background:#7eb8ff; }
+
+/* Incident feed */
+.feed-wrap { flex:1; display:flex; flex-direction:column; min-height:0; padding:0 12px 10px; }
+.feed-title { font-size:9px; color:#556; letter-spacing:2px; text-transform:uppercase; margin-bottom:5px; display:flex; justify-content:space-between; }
+.feed-title span { color:#7eb8ff; }
+.feed { flex:1; overflow-y:auto; background:#101018; border:1px solid #252535; border-radius:6px; font-size:10px; }
+.feed-row { display:grid; grid-template-columns:50px 1fr 90px 60px 50px; gap:0; padding:4px 8px; border-bottom:1px solid #181820; align-items:center; }
+.feed-row:hover { background:#14141e; }
+.feed-hdr { background:#131320; color:#556; font-size:9px; letter-spacing:1px; position:sticky; top:0; }
+.inc-type { font-size:9px; font-weight:bold; }
+.inc-crash    { color:#f44336; }
+.inc-near     { color:#ff9800; }
+.inc-blocked  { color:#ffeb3b; }
+.inc-approach { color:#4caf50; }
+.inc-clear    { color:#556; }
+.dec  { color:#aaa; }
+.rw-pos { color:#4caf50; }
+.rw-neg { color:#f44336; }
+.correct-y { color:#4caf50; }
+.correct-n { color:#f44336; }
+
+/* RIGHT */
+.right { flex:1; display:flex; flex-direction:column; min-height:0; padding:10px 12px; gap:8px; }
+.chart-wrap { flex:1; display:flex; flex-direction:column; min-height:0; }
+.chart-title { font-size:9px; color:#556; letter-spacing:2px; text-transform:uppercase; margin-bottom:4px; }
+canvas.chart { flex:1; min-height:0; display:block; background:#101018; border:1px solid #252535; border-radius:6px; }
+.ep-wrap { flex:0 0 180px; display:flex; flex-direction:column; min-height:0; }
+.ep-table { flex:1; overflow-y:auto; background:#101018; border:1px solid #252535; border-radius:6px; }
+table { width:100%; border-collapse:collapse; font-size:10px; }
+th { padding:5px 8px; color:#556; text-align:left; border-bottom:1px solid #252535; position:sticky; top:0; background:#131320; font-size:9px; }
+td { padding:4px 8px; border-bottom:1px solid #13131a; }
+.c-crash { color:#f44336; }
+.c-goal  { color:#4caf50; }
+.c-tout  { color:#ff9800; }
+
+.ppo-row { display:flex; gap:6px; flex-wrap:wrap; flex-shrink:0; }
+.pstat { background:#101018; border:1px solid #252535; border-radius:5px; padding:4px 10px; font-size:10px; }
+.pstat span { color:#7eb8ff; }
 </style>
 </head>
 <body>
 <header>
-  <h1>OVERFLOW OPENENV</h1>
-  <span id="status-badge" class="badge badge-running">TRAINING</span>
-  <div class="mode-toggle">
-    <span style="font-size:11px;color:#667">REWARD MODE:</span>
-    <button class="mode-btn active" id="btn-capped" onclick="setMode('capped')">CAPPED</button>
-    <button class="mode-btn" id="btn-uncapped" onclick="setMode('uncapped')">UNCAPPED (LLM)</button>
+  <h1>OVERFLOW OPENENV — INCIDENT MANAGEMENT</h1>
+  <span id="sbadge" class="badge badge-ok">TRAINING</span>
+  <div class="mode-row">
+    <span style="font-size:10px;color:#556">REWARD:</span>
+    <button class="mbtn on" id="bcap" onclick="setMode('capped')">CAPPED</button>
+    <button class="mbtn" id="bunc" onclick="setMode('uncapped')">UNCAPPED (LLM tokens)</button>
   </div>
 </header>
+
 <main>
-  <!-- LEFT: road + metrics + stage -->
-  <div class="left-panel">
-    <div>
-      <div class="panel-title">Road View — Live</div>
-      <canvas id="road-canvas"></canvas>
+  <!-- LEFT -->
+  <div class="left">
+    <div class="road-wrap">
+      <canvas id="road" width="800" height="150"></canvas>
     </div>
-    <div class="metrics-grid">
-      <div class="metric-card">
-        <div class="metric-label">Total Steps</div>
-        <div class="metric-value" id="m-steps">0</div>
-        <div class="metric-sub" id="m-sps">0 sps</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">Episodes</div>
-        <div class="metric-value" id="m-eps">0</div>
-        <div class="metric-sub" id="m-eplen">avg len: 0</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">Mean Reward (100)</div>
-        <div class="metric-value" id="m-reward">0.00</div>
-        <div class="metric-sub" id="m-curr-r">ep: 0.00</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">PPO Updates</div>
-        <div class="metric-value" id="m-updates">0</div>
-        <div class="metric-sub">policy gradient</div>
+
+    <div class="metrics-row">
+      <div class="mc"><div class="mc-label">Steps</div><div class="mc-val" id="m-st">0</div><div class="mc-sub" id="m-ep">ep 0</div></div>
+      <div class="mc"><div class="mc-label">Mean Reward</div><div class="mc-val" id="m-mr">0.00</div><div class="mc-sub" id="m-er">ep: 0.00</div></div>
+      <div class="mc"><div class="mc-label">Response Acc.</div><div class="mc-val" id="m-acc">0%</div><div class="mc-sub">correct actions</div></div>
+      <div class="mc"><div class="mc-label">PPO Updates</div><div class="mc-val" id="m-up">0</div><div class="mc-sub" id="m-st2">stage 1</div></div>
+    </div>
+
+    <div class="stage-row">
+      <div class="stage-inner">
+        <div class="stage-title">CURRICULUM — <span id="sname">Survival</span></div>
+        <div class="pips"><div class="pip active" id="p1"></div><div class="pip" id="p2"></div><div class="pip" id="p3"></div><div class="pip" id="p4"></div></div>
       </div>
     </div>
-    <div class="stage-bar">
-      <div class="panel-title">Curriculum Stage — <span id="stage-name">Survival</span></div>
-      <div class="stage-stages">
-        <div class="stage-pip active" id="pip-1"></div>
-        <div class="stage-pip" id="pip-2"></div>
-        <div class="stage-pip" id="pip-3"></div>
-        <div class="stage-pip" id="pip-4"></div>
+
+    <div class="feed-wrap">
+      <div class="feed-title">INCIDENT FEED — LIVE DECISIONS <span id="acc-badge">ACC 0%</span></div>
+      <div class="feed" id="feed">
+        <div class="feed-row feed-hdr">
+          <div>STEP</div><div>INCIDENT</div><div>DECISION</div><div>REWARD</div><div>OK?</div>
+        </div>
       </div>
-    </div>
-    <div>
-      <div class="panel-title">PPO Losses</div>
-      <div class="ppo-row">
-        <div class="ppo-stat">Policy: <span id="pg-loss">—</span></div>
-        <div class="ppo-stat">Value: <span id="vf-loss">—</span></div>
-        <div class="ppo-stat">Entropy: <span id="entropy">—</span></div>
-      </div>
-    </div>
-    <div id="error-section" style="display:none">
-      <div class="panel-title" style="color:#f44336">Error</div>
-      <div class="error-box" id="error-text"></div>
     </div>
   </div>
 
-  <!-- RIGHT: reward chart + episode table -->
-  <div class="right-panel">
-    <div style="flex:0 0 auto">
-      <div class="panel-title">Reward History</div>
+  <!-- RIGHT -->
+  <div class="right">
+    <div class="chart-wrap" style="flex:0 0 45%">
+      <div class="chart-title">EPISODE REWARD HISTORY</div>
+      <canvas class="chart" id="rwChart"></canvas>
     </div>
-    <canvas id="reward-canvas"></canvas>
-    <div style="flex:0 0 auto">
-      <div class="panel-title">Episode Log</div>
+    <div class="chart-wrap" style="flex:0 0 28%">
+      <div class="chart-title">RESPONSE ACCURACY % (per episode)</div>
+      <canvas class="chart" id="accChart"></canvas>
     </div>
-    <div class="episode-table">
-      <table>
-        <thead><tr>
-          <th>#</th><th>Steps</th><th>Reward</th><th>Outcome</th><th>Stage</th><th>Mode</th>
-        </tr></thead>
-        <tbody id="ep-tbody"></tbody>
-      </table>
+    <div class="ep-wrap">
+      <div class="chart-title">EPISODE LOG</div>
+      <div class="ep-table">
+        <table><thead><tr><th>#</th><th>Steps</th><th>Reward</th><th>Outcome</th><th>Acc%</th><th>Stage</th></tr></thead>
+        <tbody id="eptbl"></tbody></table>
+      </div>
+    </div>
+    <div class="ppo-row">
+      <div class="pstat">PG: <span id="pg">—</span></div>
+      <div class="pstat">VF: <span id="vf">—</span></div>
+      <div class="pstat">Ent: <span id="ent">—</span></div>
+      <div class="pstat">Mode: <span id="mode-lbl">capped</span></div>
     </div>
   </div>
 </main>
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
-let state = { cars: [], reward_history: [], episode_history: [], stage: 1, reward_mode: 'capped' };
+let S = {
+  cars:[], reward_history:[], accuracy_history:[], episode_history:[],
+  incident_feed:[], incident_counts:{}, stage:1, reward_mode:'capped',
+  response_accuracy:0, total_steps:0, n_episodes:0, n_updates:0,
+  ego_x:0, goal_x:180, episode_reward:0, episode_steps:0,
+  mean_reward:0, pg_loss:0, vf_loss:0, entropy:0, stage_name:'Survival',
+};
 
-// ── Road canvas ────────────────────────────────────────────────────────────
-const roadCanvas = document.getElementById('road-canvas');
-const roadCtx    = roadCanvas.getContext('2d');
-const N_LANES    = 3;
-const LANE_H     = 40;
-const ROAD_PAD   = 20;
+// ── Road canvas ──────────────────────────────────────────────────────────
+const roadC = document.getElementById('road');
+const roadX = roadC.getContext('2d');
+const N_LANES = 3, LANE_H = 40, ROAD_TOP = (150 - N_LANES*LANE_H)/2;
 
-function resizeRoad() {
-  roadCanvas.width  = roadCanvas.offsetWidth;
-  roadCanvas.height = roadCanvas.offsetHeight;
-}
-resizeRoad();
-window.addEventListener('resize', resizeRoad);
-
-function laneY(lane) {
-  // lane 1..3, top = lane 1
-  const totalH = N_LANES * LANE_H;
-  const offsetY = (roadCanvas.height - totalH) / 2;
-  return offsetY + (lane - 1) * LANE_H + LANE_H / 2;
-}
-
-function carX(x, egoX) {
-  // Center ego at 30% of canvas
-  const w = roadCanvas.width;
-  const scale = 0.8;   // pixels per unit
-  return w * 0.3 + (x - egoX) * scale;
+function laneY(lane) { return ROAD_TOP + (lane-1)*LANE_H + LANE_H/2; }
+function carPx(x) {
+  const w = roadC.offsetWidth || 800;
+  return w*0.3 + (x - S.ego_x)*0.8;
 }
 
 function drawRoad() {
-  const w = roadCanvas.width, h = roadCanvas.height;
-  roadCtx.clearRect(0, 0, w, h);
-
-  // Road background
-  const totalH = N_LANES * LANE_H;
-  const offsetY = (h - totalH) / 2;
-  roadCtx.fillStyle = '#1a1a28';
-  roadCtx.fillRect(0, offsetY, w, totalH);
-
-  // Lane dividers
-  roadCtx.setLineDash([20, 15]);
-  roadCtx.strokeStyle = '#3a3a50';
-  roadCtx.lineWidth = 1;
-  for (let i = 1; i < N_LANES; i++) {
-    const y = offsetY + i * LANE_H;
-    roadCtx.beginPath();
-    roadCtx.moveTo(0, y);
-    roadCtx.lineTo(w, y);
-    roadCtx.stroke();
+  const w = roadC.offsetWidth || 800, h = 150;
+  roadC.width = w;
+  const ctx = roadX;
+  ctx.clearRect(0,0,w,h);
+  // Road bg
+  ctx.fillStyle='#15151f';
+  ctx.fillRect(0, ROAD_TOP, w, N_LANES*LANE_H);
+  // Lane lines
+  ctx.setLineDash([18,12]); ctx.strokeStyle='#2a2a40'; ctx.lineWidth=1;
+  for(let i=1;i<N_LANES;i++){
+    const y=ROAD_TOP+i*LANE_H;
+    ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();
   }
-  roadCtx.setLineDash([]);
-
+  ctx.setLineDash([]);
   // Road edges
-  roadCtx.strokeStyle = '#5a5a80';
-  roadCtx.lineWidth = 2;
-  roadCtx.beginPath(); roadCtx.moveTo(0, offsetY); roadCtx.lineTo(w, offsetY); roadCtx.stroke();
-  roadCtx.beginPath(); roadCtx.moveTo(0, offsetY + totalH); roadCtx.lineTo(w, offsetY + totalH); roadCtx.stroke();
-
+  ctx.strokeStyle='#4a4a6a'; ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(0,ROAD_TOP);ctx.lineTo(w,ROAD_TOP);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(0,ROAD_TOP+N_LANES*LANE_H);ctx.lineTo(w,ROAD_TOP+N_LANES*LANE_H);ctx.stroke();
+  // Goal marker
+  const gx = carPx(S.goal_x);
+  if(gx>0 && gx<w){
+    ctx.strokeStyle='rgba(76,175,80,0.6)'; ctx.lineWidth=2; ctx.setLineDash([4,4]);
+    ctx.beginPath();ctx.moveTo(gx,ROAD_TOP);ctx.lineTo(gx,ROAD_TOP+N_LANES*LANE_H);ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle='rgba(76,175,80,0.8)'; ctx.font='bold 9px Courier New'; ctx.textAlign='center';
+    ctx.fillText('GOAL',gx,ROAD_TOP-3);
+  }
   // Cars
-  const egoX = state.ego_x || 0;
-  for (const car of state.cars || []) {
-    const cx = carX(car.x, egoX);
-    if (cx < -50 || cx > w + 50) continue;
-    const cy = laneY(car.lane);
-    const isEgo = car.car_id === 0;
-
-    // Car body
-    roadCtx.save();
-    roadCtx.translate(cx, cy);
-    const cw = 36, ch = 18;
-    roadCtx.fillStyle = isEgo ? '#2a5a9a' : '#3a2a1a';
-    roadCtx.strokeStyle = isEgo ? '#7eb8ff' : '#ff9800';
-    roadCtx.lineWidth = isEgo ? 2 : 1;
-    roadCtx.beginPath();
-    roadCtx.roundRect(-cw/2, -ch/2, cw, ch, 4);
-    roadCtx.fill();
-    roadCtx.stroke();
-
-    // Label
-    roadCtx.fillStyle = isEgo ? '#7eb8ff' : '#ff9800';
-    roadCtx.font = isEgo ? 'bold 9px Courier New' : '8px Courier New';
-    roadCtx.textAlign = 'center';
-    roadCtx.textBaseline = 'middle';
-    roadCtx.fillText(isEgo ? 'EGO' : `C${car.car_id}`, 0, 0);
-    roadCtx.restore();
+  for(const car of (S.cars||[])){
+    const cx=carPx(car.x), cy=laneY(car.lane);
+    if(cx<-60||cx>w+60) continue;
+    const isEgo=car.car_id===0;
+    ctx.save(); ctx.translate(cx,cy);
+    ctx.fillStyle=isEgo?'#1a3a6a':'#2a1e10';
+    ctx.strokeStyle=isEgo?'#7eb8ff':'#ff9800';
+    ctx.lineWidth=isEgo?2:1;
+    ctx.beginPath(); ctx.roundRect(-18,-10,36,20,4); ctx.fill(); ctx.stroke();
+    ctx.fillStyle=isEgo?'#7eb8ff':'#ff9800';
+    ctx.font=isEgo?'bold 8px Courier New':'7px Courier New';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(isEgo?'EGO':'C'+car.car_id,0,0);
+    // Speed indicator
+    ctx.fillStyle='rgba(255,255,255,0.3)'; ctx.font='6px Courier New'; ctx.textBaseline='top';
+    ctx.fillText(Math.round(car.speed),0,11);
+    ctx.restore();
   }
 }
 
-// ── Reward chart ────────────────────────────────────────────────────────────
-const rwCanvas = document.getElementById('reward-canvas');
-const rwCtx    = rwCanvas.getContext('2d');
-
-function resizeRw() {
-  rwCanvas.width  = rwCanvas.offsetWidth;
-  rwCanvas.height = rwCanvas.offsetHeight;
-}
-resizeRw();
-window.addEventListener('resize', resizeRw);
-
-function drawRewardChart() {
-  const w = rwCanvas.width, h = rwCanvas.height;
-  rwCtx.clearRect(0, 0, w, h);
-
-  const hist = state.reward_history || [];
-  if (hist.length < 2) {
-    rwCtx.fillStyle = '#667';
-    rwCtx.font = '12px Courier New';
-    rwCtx.textAlign = 'center';
-    rwCtx.fillText('Waiting for episodes...', w/2, h/2);
+// ── Chart drawing ────────────────────────────────────────────────────────
+function drawLineChart(canvasId, data, color, label, yMin, yMax, showZero) {
+  const canvas = document.getElementById(canvasId);
+  const w = canvas.offsetWidth||400, h = canvas.offsetHeight||160;
+  canvas.width=w; canvas.height=h;
+  const ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,w,h);
+  if(!data||data.length<2){
+    ctx.fillStyle='#445'; ctx.font='11px Courier New'; ctx.textAlign='center';
+    ctx.fillText('Waiting for data...', w/2, h/2);
     return;
   }
-
-  const pad = { top: 10, right: 10, bottom: 30, left: 50 };
-  const pw = w - pad.left - pad.right;
-  const ph = h - pad.top - pad.bottom;
-
-  const minR = Math.min(...hist);
-  const maxR = Math.max(...hist);
-  const rangeR = maxR - minR || 1;
-
-  const xScale = pw / (hist.length - 1);
-  const yScale = ph / rangeR;
-
+  const pad={t:8,r:8,b:22,l:48};
+  const pw=w-pad.l-pad.r, ph=h-pad.t-pad.b;
+  const mn = yMin!==undefined?yMin:Math.min(...data);
+  const mx = yMax!==undefined?yMax:Math.max(...data);
+  const rng = mx-mn||1;
   // Grid
-  rwCtx.strokeStyle = '#1e1e2e';
-  rwCtx.lineWidth = 1;
-  for (let i = 0; i <= 4; i++) {
-    const y = pad.top + ph * (i / 4);
-    rwCtx.beginPath(); rwCtx.moveTo(pad.left, y); rwCtx.lineTo(pad.left + pw, y); rwCtx.stroke();
-    const val = maxR - rangeR * (i / 4);
-    rwCtx.fillStyle = '#556';
-    rwCtx.font = '9px Courier New';
-    rwCtx.textAlign = 'right';
-    rwCtx.fillText(val.toFixed(1), pad.left - 4, y + 3);
+  ctx.strokeStyle='#1a1a28'; ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){
+    const y=pad.t+ph*(i/4);
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(pad.l+pw,y);ctx.stroke();
+    ctx.fillStyle='#445'; ctx.font='8px Courier New'; ctx.textAlign='right';
+    ctx.fillText((mx-rng*(i/4)).toFixed(1), pad.l-3, y+3);
   }
-
   // Zero line
-  if (minR < 0 && maxR > 0) {
-    const zy = pad.top + (maxR / rangeR) * ph;
-    rwCtx.strokeStyle = '#3a3a50';
-    rwCtx.lineWidth = 1;
-    rwCtx.setLineDash([4, 4]);
-    rwCtx.beginPath(); rwCtx.moveTo(pad.left, zy); rwCtx.lineTo(pad.left + pw, zy); rwCtx.stroke();
-    rwCtx.setLineDash([]);
+  if(showZero && mn<0 && mx>0){
+    const zy=pad.t+(mx/rng)*ph;
+    ctx.strokeStyle='#3a3a50'; ctx.setLineDash([4,4]);
+    ctx.beginPath();ctx.moveTo(pad.l,zy);ctx.lineTo(pad.l+pw,zy);ctx.stroke();
+    ctx.setLineDash([]);
   }
-
-  // Moving average (window=10)
-  const MA = 10;
-  const ma = hist.map((_, i) => {
-    const sl = hist.slice(Math.max(0, i - MA + 1), i + 1);
-    return sl.reduce((a, b) => a + b, 0) / sl.length;
+  // MA-10
+  const ma=data.map((_,i)=>{
+    const sl=data.slice(Math.max(0,i-9),i+1);
+    return sl.reduce((a,b)=>a+b,0)/sl.length;
   });
-
-  // Raw line
-  rwCtx.strokeStyle = 'rgba(126,184,255,0.25)';
-  rwCtx.lineWidth = 1;
-  rwCtx.beginPath();
-  hist.forEach((v, i) => {
-    const x = pad.left + i * xScale;
-    const y = pad.top + (maxR - v) * yScale;
-    i === 0 ? rwCtx.moveTo(x, y) : rwCtx.lineTo(x, y);
-  });
-  rwCtx.stroke();
-
-  // MA line
-  rwCtx.strokeStyle = '#7eb8ff';
-  rwCtx.lineWidth = 2;
-  rwCtx.beginPath();
-  ma.forEach((v, i) => {
-    const x = pad.left + i * xScale;
-    const y = pad.top + (maxR - v) * yScale;
-    i === 0 ? rwCtx.moveTo(x, y) : rwCtx.lineTo(x, y);
-  });
-  rwCtx.stroke();
-
-  // X axis label
-  rwCtx.fillStyle = '#556';
-  rwCtx.font = '9px Courier New';
-  rwCtx.textAlign = 'center';
-  rwCtx.fillText(`Episodes (${hist.length})`, pad.left + pw / 2, h - 6);
+  // Raw
+  ctx.strokeStyle=color+'44'; ctx.lineWidth=1; ctx.beginPath();
+  data.forEach((v,i)=>{
+    const x=pad.l+i*(pw/(data.length-1)), y=pad.t+(mx-v)/rng*ph;
+    i?ctx.lineTo(x,y):ctx.moveTo(x,y);
+  }); ctx.stroke();
+  // Smoothed
+  ctx.strokeStyle=color; ctx.lineWidth=2; ctx.beginPath();
+  ma.forEach((v,i)=>{
+    const x=pad.l+i*(pw/(ma.length-1)), y=pad.t+(mx-v)/rng*ph;
+    i?ctx.lineTo(x,y):ctx.moveTo(x,y);
+  }); ctx.stroke();
+  // X label
+  ctx.fillStyle='#445'; ctx.font='8px Courier New'; ctx.textAlign='center';
+  ctx.fillText(label+' ('+data.length+')', pad.l+pw/2, h-4);
 }
 
-// ── Episode table ───────────────────────────────────────────────────────────
-function updateEpisodeTable() {
-  const tbody = document.getElementById('ep-tbody');
-  const episodes = (state.episode_history || []).slice().reverse().slice(0, 50);
-  tbody.innerHTML = episodes.map(ep => `
-    <tr>
-      <td>${ep.episode}</td>
-      <td>${ep.steps}</td>
-      <td style="color:${ep.reward >= 0 ? '#4caf50' : '#f44336'}">${ep.reward.toFixed(2)}</td>
-      <td class="outcome-${ep.outcome}">${ep.outcome.toUpperCase()}</td>
-      <td>${ep.stage}</td>
-      <td style="color:#ff9800">${ep.mode || ep.reward_mode || 'capped'}</td>
-    </tr>
-  `).join('');
+// ── Incident feed ────────────────────────────────────────────────────────
+const INC_COLORS = {
+  'CRASH_IMMINENT':  'inc-crash',
+  'NEAR_MISS_AHEAD': 'inc-near',
+  'NEAR_MISS_SIDE':  'inc-near',
+  'BLOCKED_AHEAD':   'inc-blocked',
+  'APPROACHING_GOAL':'inc-approach',
+  'CLEAR_ROAD':      'inc-clear',
+};
+const INC_SHORT = {
+  'CRASH_IMMINENT':'CRASH!','NEAR_MISS_AHEAD':'NM-AHEAD','NEAR_MISS_SIDE':'NM-SIDE',
+  'BLOCKED_AHEAD':'BLOCKED','APPROACHING_GOAL':'GOAL-NEAR','CLEAR_ROAD':'CLEAR',
+};
+
+function renderFeed(feed) {
+  const el = document.getElementById('feed');
+  // Keep header row, add/update feed rows
+  const header = el.querySelector('.feed-hdr');
+  el.innerHTML = '';
+  if(header) el.appendChild(header);
+  else {
+    const h = document.createElement('div');
+    h.className='feed-row feed-hdr';
+    h.innerHTML='<div>STEP</div><div>INCIDENT</div><div>DECISION</div><div>REWARD</div><div>OK?</div>';
+    el.appendChild(h);
+  }
+  const items = [...feed].reverse();
+  for(const e of items){
+    const row = document.createElement('div');
+    row.className='feed-row';
+    const tc = INC_COLORS[e.incident_type]||'inc-clear';
+    const ts = INC_SHORT[e.incident_type]||e.incident_type;
+    const rwc = e.reward>=0?'rw-pos':'rw-neg';
+    const okc = e.correct?'correct-y':'correct-n';
+    const okl = e.correct?'YES':'NO';
+    row.innerHTML = `
+      <div style="color:#556">${e.step}</div>
+      <div class="inc-type ${tc}">${ts}</div>
+      <div class="dec">${e.decision}</div>
+      <div class="${rwc}">${e.reward>0?'+':''}${e.reward}</div>
+      <div class="${okc}">${okl}</div>`;
+    el.appendChild(row);
+  }
 }
 
-// ── Metric update ───────────────────────────────────────────────────────────
-function updateMetrics(s) {
-  document.getElementById('m-steps').textContent = s.total_steps?.toLocaleString() || '0';
-  document.getElementById('m-sps').textContent   = `${(s.steps_per_sec||0).toFixed(0)} sps`;
-  document.getElementById('m-eps').textContent    = s.n_episodes || '0';
-  document.getElementById('m-eplen').textContent  = `avg len: ${(s.mean_ep_len||0).toFixed(0)}`;
-  document.getElementById('m-reward').textContent = (s.mean_reward||0).toFixed(2);
-  document.getElementById('m-curr-r').textContent = `ep: ${(s.episode_reward||0).toFixed(2)}`;
-  document.getElementById('m-updates').textContent = s.n_updates || '0';
-  document.getElementById('pg-loss').textContent  = s.pg_loss ?? '—';
-  document.getElementById('vf-loss').textContent  = s.vf_loss ?? '—';
-  document.getElementById('entropy').textContent  = s.entropy ?? '—';
-  document.getElementById('stage-name').textContent = s.stage_name || 'Survival';
+// ── Episode table ────────────────────────────────────────────────────────
+function renderEpTable(hist) {
+  const tb = document.getElementById('eptbl');
+  const rows = [...hist].reverse().slice(0,40).map(ep=>{
+    const oc = ep.outcome==='crash'?'c-crash':ep.outcome==='goal'?'c-goal':'c-tout';
+    const rw = ep.reward>=0?`<span class="c-goal">+${ep.reward}</span>`:`<span class="c-crash">${ep.reward}</span>`;
+    return `<tr><td>${ep.episode}</td><td>${ep.steps}</td><td>${rw}</td>
+      <td class="${oc}">${ep.outcome.toUpperCase()}</td>
+      <td>${ep.accuracy||0}%</td><td>${ep.stage}</td></tr>`;
+  }).join('');
+  tb.innerHTML = rows;
+}
 
-  const stage = s.stage || 1;
-  for (let i = 1; i <= 4; i++) {
-    const pip = document.getElementById(`pip-${i}`);
-    pip.className = 'stage-pip' + (i < stage ? ' done' : (i === stage ? ' active' : ''));
+// ── UI update ─────────────────────────────────────────────────────────────
+function updateUI() {
+  document.getElementById('m-st').textContent = S.total_steps.toLocaleString();
+  document.getElementById('m-ep').textContent = `ep ${S.n_episodes}`;
+  document.getElementById('m-mr').textContent = S.mean_reward.toFixed(2);
+  document.getElementById('m-er').textContent = `ep: ${S.episode_reward.toFixed(2)}`;
+  document.getElementById('m-acc').textContent = `${S.response_accuracy}%`;
+  document.getElementById('m-up').textContent = S.n_updates;
+  document.getElementById('m-st2').textContent = `stage ${S.stage}`;
+  document.getElementById('sname').textContent = S.stage_name||'Survival';
+  document.getElementById('pg').textContent = S.pg_loss||'—';
+  document.getElementById('vf').textContent = S.vf_loss||'—';
+  document.getElementById('ent').textContent = S.entropy||'—';
+  document.getElementById('mode-lbl').textContent = S.reward_mode;
+  document.getElementById('acc-badge').textContent = `ACC ${S.response_accuracy}%`;
+
+  // Stage pips
+  const st=S.stage||1;
+  for(let i=1;i<=4;i++){
+    const p=document.getElementById('p'+i);
+    p.className='pip'+(i<st?' done':i===st?' active':'');
   }
-
   // Mode buttons
-  const mode = s.reward_mode || 'capped';
-  document.getElementById('btn-capped').className   = 'mode-btn' + (mode === 'capped' ? ' active' : '');
-  document.getElementById('btn-uncapped').className = 'mode-btn' + (mode === 'uncapped' ? ' active' : '');
+  document.getElementById('bcap').className='mbtn'+(S.reward_mode==='capped'?' on':'');
+  document.getElementById('bunc').className='mbtn'+(S.reward_mode==='uncapped'?' on':'');
 
-  if (s.error) {
-    document.getElementById('error-section').style.display = 'block';
-    document.getElementById('error-text').textContent = s.error;
-    document.getElementById('status-badge').textContent = 'ERROR';
-    document.getElementById('status-badge').className = 'badge badge-error';
+  if(S.error){
+    document.getElementById('sbadge').textContent='ERROR';
+    document.getElementById('sbadge').className='badge badge-err';
   }
 }
 
-// ── Mode switch ─────────────────────────────────────────────────────────────
+// ── Render all ────────────────────────────────────────────────────────────
+function renderAll() {
+  drawRoad();
+  drawLineChart('rwChart', S.reward_history, '#7eb8ff', 'Episodes', undefined, undefined, true);
+  drawLineChart('accChart', S.accuracy_history, '#4caf50', 'Episodes', 0, 100, false);
+  renderFeed(S.incident_feed||[]);
+  renderEpTable(S.episode_history||[]);
+  updateUI();
+}
+
+// ── Mode switch ────────────────────────────────────────────────────────────
 function setMode(mode) {
-  fetch('/api/mode', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode })
-  }).then(r => r.json()).then(d => {
-    state.reward_mode = d.mode;
-    updateMetrics(state);
-  });
+  fetch('/api/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})})
+    .then(r=>r.json()).then(d=>{S.reward_mode=d.mode;updateUI();});
 }
 
-// ── Poll /api/state every 2s (SSE as supplement) ───────────────────────────
-function poll() {
-  fetch('/api/state').then(r => r.json()).then(s => {
-    Object.assign(state, s);
-    drawRoad();
-    drawRewardChart();
-    updateMetrics(s);
-    updateEpisodeTable();
-  }).catch(() => {});
-}
-setInterval(poll, 2000);
-poll();
-
-// ── SSE for fast episode events ─────────────────────────────────────────────
+// ── SSE for fast events ───────────────────────────────────────────────────
 const evtSrc = new EventSource('/api/stream');
 evtSrc.onmessage = (e) => {
   try {
     const msg = JSON.parse(e.data);
-    if (msg.type === 'episode') {
-      if (!state.episode_history) state.episode_history = [];
-      state.episode_history.push(msg.data);
-      if (!state.reward_history) state.reward_history = [];
-      state.reward_history.push(msg.data.reward);
-      updateEpisodeTable();
-      drawRewardChart();
-    } else if (msg.type === 'tick') {
-      Object.assign(state, msg.data);
-      drawRoad();
-    } else if (msg.type === 'update') {
-      Object.assign(state, msg.data);
-      updateMetrics(state);
+    if(msg.type==='incident'){
+      if(!S.incident_feed) S.incident_feed=[];
+      S.incident_feed.push(msg.data);
+      if(S.incident_feed.length>100) S.incident_feed=S.incident_feed.slice(-100);
+      renderFeed(S.incident_feed);
+    } else if(msg.type==='episode'){
+      if(!S.episode_history) S.episode_history=[];
+      S.episode_history.push(msg.data);
+      if(!S.reward_history) S.reward_history=[];
+      S.reward_history.push(msg.data.reward);
+      if(!S.accuracy_history) S.accuracy_history=[];
+      S.accuracy_history.push(msg.data.accuracy||0);
+      renderEpTable(S.episode_history);
+      drawLineChart('rwChart', S.reward_history, '#7eb8ff', 'Episodes', undefined, undefined, true);
+      drawLineChart('accChart', S.accuracy_history, '#4caf50', 'Episodes', 0, 100, false);
+    } else if(msg.type==='tick'){
+      Object.assign(S, msg.data);
+      drawRoad(); updateUI();
+    } else if(msg.type==='update'){
+      Object.assign(S, msg.data);
+      updateUI();
     }
-  } catch(err) {}
+  } catch(_){}
 };
 
-// Render loop for smooth road animation
-function renderLoop() {
-  drawRoad();
-  requestAnimationFrame(renderLoop);
+// ── Poll every 3s for full state sync ─────────────────────────────────────
+function poll() {
+  fetch('/api/state').then(r=>r.json()).then(s=>{Object.assign(S,s);renderAll();}).catch(()=>{});
 }
-renderLoop();
+setInterval(poll, 3000);
+poll();
+
+// ── Road animation loop ────────────────────────────────────────────────────
+(function loop(){ drawRoad(); requestAnimationFrame(loop); })();
 </script>
 </body>
 </html>
 """
-
 
 @app.get("/", response_class=HTMLResponse)
 @app.get("/web", response_class=HTMLResponse)
