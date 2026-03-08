@@ -1,0 +1,42 @@
+[
+  {
+    "ticket_id": "INC-001",
+    "severity": "critical",
+    "timestamp_utc": "2024-03-15T14:32:07Z",
+    "raw_text": "Waymo AV was traveling at 28 mph on Market St in rainy conditions. A pedestrian jaywalked suddenly from between parked cars at approximately 15m ahead. AV detected the pedestrian and braked hard, narrowly avoiding contact. Speed limit: 30 mph. High traffic density. Two following vehicles within 20m.",
+    "expected_incident_type": "jaywalker",
+    "expected_weather": "rain"
+  },
+  {
+    "ticket_id": "INC-002",
+    "severity": "severe",
+    "timestamp_utc": "2024-03-18T09:11:42Z",
+    "raw_text": "Vehicle approaching intersection at 35 mph in foggy conditions on Oak Ave, 35 mph speed limit. Cross traffic ran a red light at approximately 60 ft distance. Ego vehicle applied emergency brakes and initiated controlled swerve to the right. Near-miss recorded at timestamp 14:32. Two additional trailing vehicles within 20m behind ego. No contact made.",
+    "expected_incident_type": "intersection",
+    "expected_weather": "fog"
+  },
+  {
+    "ticket_id": "INC-003",
+    "severity": "moderate",
+    "timestamp_utc": "2024-03-20T18:55:19Z",
+    "raw_text": "On I-280 northbound, a white SUV in the adjacent lane made an abrupt lane change into the ego vehicle's lane without signaling. Relative closing speed approximately 5 mph. Clear weather, 65 mph speed limit, light traffic conditions. Ego vehicle decelerated and briefly moved toward the right shoulder to avoid a sideswipe collision.",
+    "expected_incident_type": "lane_change",
+    "expected_weather": "clear"
+  },
+  {
+    "ticket_id": "INC-004",
+    "severity": "moderate",
+    "timestamp_utc": "2024-04-02T11:20:33Z",
+    "raw_text": "Waymo vehicle following a sedan on Castro St, speed 22 mph, overcast conditions, 25 mph zone. Lead vehicle brake-checked unexpectedly from 22 mph to near stop in approximately 1.5 seconds. Gap at event start was ~8m. Ego performed emergency brake, gap reduced to ~2m at closest approach. Moderate traffic density.",
+    "expected_incident_type": "rear_end",
+    "expected_weather": "overcast"
+  },
+  {
+    "ticket_id": "INC-005",
+    "severity": "severe",
+    "timestamp_utc": "2024-04-10T07:45:02Z",
+    "raw_text": "Heavy rain on Van Ness Ave. Ego traveling at 18 mph, speed limit 30 mph. A cyclist emerged from a bike lane gap and cut across the ego lane at 8m distance while ego was traveling at intersection approach speed. Ego braked but hydroplaning slightly extended stopping distance. No contact. Very high traffic density, school zone.",
+    "expected_incident_type": "jaywalker",
+    "expected_weather": "heavy_rain"
+  }
+]

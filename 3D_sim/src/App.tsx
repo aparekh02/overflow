@@ -8,7 +8,11 @@ import Scene3D from "./components/Scene3D";
 import ControlPanel from "./components/ControlPanel";
 import Timeline from "./components/Timeline";
 import InfoBar from "./components/InfoBar";
+import IncidentPanel from "./components/IncidentPanel";
+import RLStatsPanel from "./components/RLStatsPanel";
 import { useStore } from "./store";
+import { useRLStore } from "./rlStore";
+import { wsClient } from "./middleware/wsClient";
 import type { DataSource } from "./store";
 import { generateSceneData } from "./mockData";
 import {
@@ -142,7 +146,7 @@ function LoadingScreen() {
 // Error screen
 // ---------------------------------------------------------------------------
 
-function ErrorScreen() {
+function ErrorScreen({ onOpenENV }: { onOpenENV?: () => void }) {
   const loadError = useStore((s) => s.loadError);
   const actions = useStore((s) => s.actions);
 
@@ -157,23 +161,32 @@ function ErrorScreen() {
       <div style={{ maxWidth: 380, textAlign: "center", lineHeight: 1.5, fontSize: 13, color: "#FF6B6B" }}>
         {loadError || "Unknown error"}
       </div>
-      <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+      <div style={{ display: "flex", gap: 10, marginTop: 8, flexWrap: "wrap", justifyContent: "center" }}>
         <GlassButton label="Retry Waymo" onClick={() => { actions.reset(); actions.setDataSource("waymo"); }} accent />
         <GlassButton label="Use Mock" onClick={() => { actions.reset(); actions.setDataSource("mock"); }} />
+        {onOpenENV && (
+          <GlassButton label="Launch OpenENV ●" onClick={onOpenENV} openenv />
+        )}
       </div>
+      {onOpenENV && (
+        <div style={{ fontSize: 10, fontFamily: fonts.mono, color: colors.textDim, marginTop: 4 }}>
+          Run <span style={{ color: colors.accent }}>python3 openenv/run_demo.py</span> first
+        </div>
+      )}
     </div>
   );
 }
 
-function GlassButton({ label, onClick, accent }: { label: string; onClick: () => void; accent?: boolean }) {
+function GlassButton({ label, onClick, accent, openenv }: { label: string; onClick: () => void; accent?: boolean; openenv?: boolean }) {
   return (
     <button onClick={onClick} style={{
       padding: "7px 18px", fontSize: 12, fontFamily: fonts.sans, fontWeight: 500,
-      background: accent ? "rgba(0,232,157,0.1)" : "rgba(255,255,255,0.04)",
-      color: accent ? colors.accent : colors.textSecondary,
-      border: `1px solid ${accent ? "rgba(0,232,157,0.3)" : colors.border}`,
+      background: openenv ? "rgba(0,255,136,0.12)" : accent ? "rgba(0,232,157,0.1)" : "rgba(255,255,255,0.04)",
+      color: openenv ? "#00FF88" : accent ? colors.accent : colors.textSecondary,
+      border: `1px solid ${openenv ? "rgba(0,255,136,0.35)" : accent ? "rgba(0,232,157,0.3)" : colors.border}`,
       borderRadius: 6, cursor: "pointer", backdropFilter: "blur(12px)",
       transition: "all 0.15s",
+      boxShadow: openenv ? "0 0 14px rgba(0,255,136,0.15)" : "none",
     }}>
       {label}
     </button>
@@ -233,16 +246,78 @@ function useDropZone() {
 // App
 // ---------------------------------------------------------------------------
 
+/**
+ * useWaymoFrameForwarding — streams current Waymo frame stats to Python env.
+ * This is the key coupling that makes Waymo constraints live in the RL env.
+ */
+function useWaymoFrameForwarding() {
+  const currentFrame = useStore((s) => s.currentFrame);
+  const rlModeActive = useRLStore((s) => s.rlModeActive);
+
+  useEffect(() => {
+    if (!rlModeActive || !currentFrame) return;
+    // Compute average intensity from point attributes (every 3rd float is intensity)
+    let sum = 0;
+    const stride = 3;
+    const count = currentFrame.pointCount;
+    for (let i = 0; i < count; i++) {
+      sum += currentFrame.pointAttributes[i * stride] ?? 0;
+    }
+    const avgIntensity = count > 0 ? sum / count : 0.5;
+
+    wsClient.sendWaymoFrame(currentFrame.pointCount, currentFrame.boxes, avgIntensity);
+  }, [currentFrame, rlModeActive]);
+}
+
 export default function App() {
   useDataLoader();
+  useWaymoFrameForwarding();
   const dragging = useDropZone();
   const loadStatus = useStore((s) => s.loadStatus);
   const sceneData = useStore((s) => s.sceneData);
   const dataSource = useStore((s) => s.dataSource);
   const actions = useStore((s) => s.actions);
+  const rlModeActive = useRLStore((s) => s.rlModeActive);
+  const rlActions = useRLStore((s) => s.actions);
+
+  // When launched with ?openenv=1: load mock Waymo scene (always available)
+  // then activate RL overlay on top of the live city simulation.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("openenv")) {
+      actions.reset();
+      actions.setDataSource("mock");   // real city sim, no parquet files needed
+      rlActions.setRLModeActive(true);
+      wsClient.connect();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Auto-play Waymo scene as soon as data is ready in RL mode
+  useEffect(() => {
+    if (rlModeActive && sceneData && loadStatus === "ready") {
+      actions.setFrame(0);
+      actions.setPlaying(true);
+    }
+  }, [rlModeActive, sceneData, loadStatus, actions]);
+
+  // Toggle RL mode → connect/disconnect WebSocket
+  const handleRLToggle = useCallback(() => {
+    const next = !rlModeActive;
+    rlActions.setRLModeActive(next);
+    if (next) wsClient.connect();
+    else wsClient.disconnect();
+  }, [rlModeActive, rlActions]);
 
   if (loadStatus === "loading" || (!sceneData && loadStatus === "idle")) return <LoadingScreen />;
-  if (loadStatus === "error") return <ErrorScreen />;
+  if (loadStatus === "error") return (
+    <ErrorScreen onOpenENV={() => {
+      actions.reset();
+      actions.setDataSource("mock");
+      rlActions.setRLModeActive(true);
+      wsClient.connect();
+    }} />
+  );
 
   return (
     <div style={{ position: "fixed", inset: 0, overflow: "hidden", backgroundColor: colors.bgDeep }}>
@@ -255,10 +330,10 @@ export default function App() {
       {/* Floating control panel (top-left) */}
       <ControlPanel />
 
-      {/* Data source pills (top-right) */}
+      {/* Data source + OpenENV mode pills (top-right) */}
       <div style={{
         position: "absolute", top: 52, right: 16, zIndex: 10,
-        display: "flex", gap: 4,
+        display: "flex", gap: 4, alignItems: "center",
       }}>
         {(["waymo", "mock"] as DataSource[]).map((src) => (
           <button key={src} onClick={() => { actions.reset(); actions.setDataSource(src); }} style={{
@@ -272,10 +347,54 @@ export default function App() {
             {src === "waymo" ? "Waymo" : "Mock"}
           </button>
         ))}
+
+        {/* OpenENV mode toggle */}
+        <div style={{ width: 1, height: 16, background: "rgba(255,255,255,0.1)" }} />
+        <button onClick={handleRLToggle} style={{
+          padding: "4px 12px", fontSize: 10, fontFamily: fonts.mono, fontWeight: rlModeActive ? 600 : 400,
+          color: rlModeActive ? "#00FF88" : colors.textDim,
+          background: rlModeActive ? "rgba(0,255,136,0.12)" : "rgba(12,15,26,0.7)",
+          border: `1px solid ${rlModeActive ? "rgba(0,255,136,0.35)" : "rgba(255,255,255,0.06)"}`,
+          borderRadius: 4, cursor: "pointer", backdropFilter: "blur(12px)",
+          textTransform: "uppercase", letterSpacing: "0.8px", transition: "all 0.15s",
+          boxShadow: rlModeActive ? "0 0 12px rgba(0,255,136,0.15)" : "none",
+        }}>
+          OpenENV {rlModeActive ? "●" : "○"}
+        </button>
+        {/* Legend — only when RL active */}
+        {rlModeActive && (
+          <div style={{
+            display: "flex", gap: 8, alignItems: "center",
+            padding: "3px 10px",
+            background: "rgba(8,11,20,0.7)", backdropFilter: "blur(12px)",
+            border: "1px solid rgba(255,255,255,0.06)", borderRadius: 4,
+          }}>
+            {([
+              { color: "#00FF88", label: "EGO (Review Agent)" },
+              { color: "#FF2244", label: "Incident Actor" },
+              { color: "#4488FF", label: "Traffic" },
+            ] as const).map(({ color, label }) => (
+              <div key={label} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ width: 7, height: 7, borderRadius: 1, background: color, flexShrink: 0 }} />
+                <span style={{ fontSize: 8, fontFamily: fonts.mono, color: colors.textDim }}>{label}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* Floating timeline (bottom) */}
-      <Timeline />
+      {/* RL Stats Panel — right side, always on top when active */}
+      <RLStatsPanel />
+
+      {/* Incident submission panel — bottom right */}
+      <IncidentPanel />
+
+      {/* Timeline — always rendered so playback RAF loop keeps ticking.
+          Visible in normal mode; hidden but running in RL mode so the
+          Waymo city clip advances in sync with the RL episode. */}
+      <div style={{ visibility: rlModeActive ? "hidden" : "visible" }}>
+        <Timeline />
+      </div>
 
       {/* Drag overlay */}
       {dragging && (

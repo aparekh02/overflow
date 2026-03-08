@@ -7,6 +7,7 @@ import { OrbitControls, GizmoHelper, GizmoViewport } from "@react-three/drei";
 import PointCloud from "./PointCloud";
 import BoundingBoxes from "./BoundingBoxes";
 import EgoVehicle from "./EgoVehicle";
+import AgentOverlay from "./AgentOverlay";
 import { useStore } from "../store";
 import { colors } from "../theme";
 
@@ -24,6 +25,8 @@ function SceneContent() {
         <PointCloud />
         <BoundingBoxes />
         <EgoVehicle />
+        {/* OpenENV RL agents — layered over Waymo replay */}
+        <AgentOverlay />
       </group>
 
       {/* Ground grid */}
