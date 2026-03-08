@@ -171,11 +171,12 @@ def _training_loop() -> None:
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         policy.to(device)
-        optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4, eps=1e-5)
+        optimizer = torch.optim.Adam(policy.parameters(), lr=5e-5, eps=1e-5)
 
-        GAMMA = 0.99; GAE_LAMBDA = 0.95; CLIP = 0.2
-        ENT_COEF = 0.02; VF_COEF = 0.5; MAX_GRAD = 0.5
-        N_STEPS = 512; BATCH_SIZE = 128; N_EPOCHS = 6
+        GAMMA = 0.99; GAE_LAMBDA = 0.95; CLIP = 0.1
+        ENT_COEF = 0.005; VF_COEF = 0.5; MAX_GRAD = 0.5
+        N_STEPS = 1024; BATCH_SIZE = 128; N_EPOCHS = 3
+        STEP_DELAY = 0.008  # seconds — slows training so episodes are visible
 
         buf = RolloutBuffer(N_STEPS, OBS_DIM, device)
 
@@ -202,13 +203,17 @@ def _training_loop() -> None:
                 act_mean = act_mean.squeeze(0)
                 val      = val.squeeze(0)
 
-                dist   = torch.distributions.Normal(act_mean, torch.ones_like(act_mean) * 0.3)
+                dist   = torch.distributions.Normal(act_mean, torch.ones_like(act_mean) * 0.15)
                 action = dist.sample().clamp(-1, 1)
                 logp   = dist.log_prob(action).sum()
 
                 next_obs, base_reward, term, trunc, info = env.step(action.cpu().numpy())
 
                 reward = apply_reward_mode(base_reward)
+
+                # Pace the training so episodes are visible in the dashboard
+                if STEP_DELAY > 0:
+                    time.sleep(STEP_DELAY)
 
                 buf.add(obs, action.cpu().numpy(), reward, float(val), float(logp), float(term or trunc))
 
@@ -336,7 +341,7 @@ def _training_loop() -> None:
                     idx     = indices[start: start + BATCH_SIZE]
                     am, val = policy(all_obs[idx])
                     val     = val.squeeze(-1)
-                    dist    = torch.distributions.Normal(am, torch.ones_like(am) * 0.3)
+                    dist    = torch.distributions.Normal(am, torch.ones_like(am) * 0.15)
                     logp    = dist.log_prob(all_acts[idx]).sum(dim=-1)
                     ent     = dist.entropy().sum(dim=-1).mean()
                     ratio   = torch.exp(logp - old_logp[idx])
