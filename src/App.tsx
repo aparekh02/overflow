@@ -1,29 +1,26 @@
 /**
- * App — Full-viewport 3D perception viewer.
- * The 3D canvas IS the app. All UI floats on top as glass overlays.
+ * App — Router + data loading + app shell.
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import Scene3D from "./components/Scene3D";
-import ControlPanel from "./components/ControlPanel";
-import Timeline from "./components/Timeline";
-import InfoBar from "./components/InfoBar";
-import IncidentAlert from "./components/IncidentAlert";
-import ScenarioChat from "./components/ScenarioChat";
-import CameraViews from "./components/CameraViews";
-import KnowledgeGraph from "./components/KnowledgeGraph";
-import TicketConsole from "./components/TicketConsole";
-import DataBrowser from "./components/DataBrowser";
+import { Routes, Route, Navigate } from "react-router-dom";
+import { Toaster, toast } from "sonner";
+import AppShell from "./components/ui/AppShell";
+import SimPage from "./pages/SimPage";
+import DashboardPage from "./pages/DashboardPage";
+import GraphPage from "./pages/GraphPage";
+import AnalyticsPage from "./pages/AnalyticsPage";
 import { useStore } from "./store";
 import type { DataSource } from "./store";
 import { generateSceneData } from "./mockData";
+import { generateTrajectoryMoments } from "./utils/trajectoryData";
 import {
   loadWaymoFromUrls,
   loadWaymoFromFiles,
   scanDroppedFiles,
   type WaymoLoadResult,
 } from "./utils/waymoLoader";
-import { colors, fonts } from "./theme";
+import { colors, fonts, typeScale } from "./theme";
 
 // ---------------------------------------------------------------------------
 // Auto-detect waymo data layout
@@ -33,21 +30,15 @@ async function detectWaymoLayout(
   basePath: string,
   overrideSegment?: string | null,
 ): Promise<{ basePath: string; segmentName?: string }> {
-  // Use explicit segment from DataBrowser / store
   if (overrideSegment) {
-    console.log(`[waymo] Explicit segment: ${overrideSegment}`);
     return { basePath, segmentName: overrideSegment };
   }
-
   try {
     const resp = await fetch(`${basePath}/manifest.json`);
     if (resp.ok) {
       const manifest = await resp.json();
       const segId = manifest.segment;
-      if (segId) {
-        console.log(`[waymo] Manifest found — segment: ${segId}`);
-        return { basePath, segmentName: segId };
-      }
+      if (segId) return { basePath, segmentName: segId };
     }
   } catch { /* no manifest */ }
 
@@ -76,11 +67,14 @@ function useDataLoader() {
 
     if (dataSource === "mock") {
       actions.setLoadStatus("loading");
-      actions.setLoadMessage(`Generating "${mockScenario}" scenario…`);
+      actions.setLoadMessage(`Generating "${mockScenario}" scenario`);
       actions.setLoadProgress(0.5);
       setTimeout(() => {
         try {
-          actions.setSceneData(generateSceneData(mockScenario));
+          const sceneData = generateSceneData(mockScenario);
+          actions.setSceneData(sceneData);
+          const moments = generateTrajectoryMoments(sceneData);
+          actions.setTrajectoryMoments(moments);
         } catch (e) {
           actions.setLoadError(e instanceof Error ? e.message : String(e));
           actions.setLoadStatus("error");
@@ -88,20 +82,21 @@ function useDataLoader() {
       }, 0);
     } else if (dataSource === "waymo") {
       actions.setLoadStatus("loading");
-      actions.setLoadMessage("Detecting data layout…");
+      actions.setLoadMessage("Detecting data layout");
       actions.setLoadProgress(0);
 
       detectWaymoLayout("/waymo_data", waymoSegment)
         .then(({ basePath, segmentName }) => {
-          actions.setLoadMessage("Opening Parquet files…");
+          actions.setLoadMessage("Opening Parquet files");
           return loadWaymoFromUrls(basePath, (step, progress) => {
             actions.setLoadMessage(step);
             actions.setLoadProgress(progress);
           }, segmentName);
         })
         .then((data: WaymoLoadResult) => {
-          console.log("[loadWaymo] Success:", data.totalFrames, "frames");
           actions.setSceneData(data);
+          const moments = generateTrajectoryMoments(data);
+          actions.setTrajectoryMoments(moments);
         })
         .catch((e) => {
           console.error("[loadWaymo] Error:", e);
@@ -128,25 +123,25 @@ function LoadingScreen() {
       fontFamily: fonts.sans, zIndex: 100,
     }}>
       <div style={{
-        width: 32, height: 32,
+        width: 28, height: 28,
         border: `2px solid ${colors.accent}`,
         borderTopColor: "transparent",
         borderRadius: "50%",
         animation: "spin 0.7s linear infinite",
       }} />
       <div style={{
-        width: 200, height: 3,
+        width: 200, height: 2,
         backgroundColor: "rgba(255,255,255,0.06)",
         borderRadius: 2, overflow: "hidden",
       }}>
         <div style={{
           height: "100%",
           width: `${Math.round(loadProgress * 100)}%`,
-          background: `linear-gradient(90deg, ${colors.accent}, ${colors.accentBlue})`,
+          background: colors.accent,
           borderRadius: 2, transition: "width 0.3s ease-out",
         }} />
       </div>
-      <span style={{ color: colors.textDim, fontSize: 11, fontFamily: fonts.mono }}>
+      <span style={{ color: colors.textDim, ...typeScale.mono }}>
         {loadMessage}
       </span>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
@@ -169,31 +164,29 @@ function ErrorScreen() {
       backgroundColor: colors.bgDeep, flexDirection: "column", gap: 16,
       fontFamily: fonts.sans,
     }}>
-      <div style={{ fontSize: 28, opacity: 0.6 }}>⚠</div>
-      <div style={{ maxWidth: 380, textAlign: "center", lineHeight: 1.5, fontSize: 13, color: "#FF6B6B" }}>
+      <div style={{ maxWidth: 380, textAlign: "center", lineHeight: 1.5, fontSize: 13, color: colors.error }}>
         {loadError || "Unknown error"}
       </div>
       <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-        <GlassButton label="Retry Waymo" onClick={() => { actions.reset(); actions.setDataSource("waymo"); }} accent />
-        <GlassButton label="Use Mock" onClick={() => { actions.reset(); actions.setDataSource("mock"); }} />
+        <button onClick={() => { actions.reset(); actions.setDataSource("waymo"); }} style={btnStyle(true)}>
+          Retry Waymo
+        </button>
+        <button onClick={() => { actions.reset(); actions.setDataSource("mock"); }} style={btnStyle(false)}>
+          Use Mock
+        </button>
       </div>
     </div>
   );
 }
 
-function GlassButton({ label, onClick, accent }: { label: string; onClick: () => void; accent?: boolean }) {
-  return (
-    <button onClick={onClick} style={{
-      padding: "7px 18px", fontSize: 12, fontFamily: fonts.sans, fontWeight: 500,
-      background: accent ? "rgba(0,232,157,0.1)" : "rgba(255,255,255,0.04)",
-      color: accent ? colors.accent : colors.textSecondary,
-      border: `1px solid ${accent ? "rgba(0,232,157,0.3)" : colors.border}`,
-      borderRadius: 6, cursor: "pointer", backdropFilter: "blur(12px)",
-      transition: "all 0.15s",
-    }}>
-      {label}
-    </button>
-  );
+function btnStyle(accent: boolean): React.CSSProperties {
+  return {
+    padding: "7px 18px", fontSize: 12, fontFamily: fonts.sans, fontWeight: 500,
+    background: accent ? "rgba(0,232,157,0.08)" : "rgba(255,255,255,0.04)",
+    color: accent ? colors.accent : colors.textSecondary,
+    border: `1px solid ${accent ? colors.borderAccent : colors.border}`,
+    borderRadius: 6, cursor: "pointer",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -216,16 +209,20 @@ function useDropZone() {
     actions.reset();
     actions.setDataSource("waymo-drop");
     actions.setLoadStatus("loading");
-    actions.setLoadMessage("Scanning files…");
+    actions.setLoadMessage("Scanning files");
     actions.setLoadProgress(0);
     try {
       const fileMap = await scanDroppedFiles(e.dataTransfer.items);
       if (!fileMap.has("vehicle_pose") || !fileMap.has("lidar")) throw new Error("Need vehicle_pose + lidar parquet files.");
       const data = await loadWaymoFromFiles(fileMap, (step, progress) => { actions.setLoadMessage(step); actions.setLoadProgress(progress); });
       actions.setSceneData(data);
+      const moments = generateTrajectoryMoments(data);
+      actions.setTrajectoryMoments(moments);
+      toast.success("Waymo data loaded successfully");
     } catch (err) {
       actions.setLoadError(err instanceof Error ? err.message : String(err));
       actions.setLoadStatus("error");
+      toast.error("Failed to load Waymo data");
     }
   }, [actions]);
 
@@ -254,74 +251,45 @@ export default function App() {
   const dragging = useDropZone();
   const loadStatus = useStore((s) => s.loadStatus);
   const sceneData = useStore((s) => s.sceneData);
-  const dataSource = useStore((s) => s.dataSource);
-  const actions = useStore((s) => s.actions);
 
   if (loadStatus === "loading" || (!sceneData && loadStatus === "idle")) return <LoadingScreen />;
   if (loadStatus === "error") return <ErrorScreen />;
 
   return (
-    <div style={{ position: "fixed", inset: 0, overflow: "hidden", backgroundColor: colors.bgDeep }}>
-      {/* Full-viewport 3D canvas — THE center of the app */}
-      <Scene3D />
+    <>
+      <Toaster
+        position="bottom-right"
+        theme="dark"
+        toastOptions={{
+          style: {
+            background: colors.bgCard,
+            border: `1px solid ${colors.border}`,
+            color: colors.textPrimary,
+            fontFamily: fonts.sans,
+            fontSize: 12,
+          },
+        }}
+      />
 
-      {/* Floating top info bar */}
-      <InfoBar />
-      <IncidentAlert />
-
-      {/* Floating control panel (top-left) */}
-      <ControlPanel />
-
-      {/* Data source pills (top-right, above knowledge graph) */}
-      <div style={{
-        position: "absolute", top: 52, right: 8, zIndex: 12,
-        display: "flex", gap: 4,
-      }}>
-        {(["waymo", "mock"] as DataSource[]).map((src) => (
-          <button key={src} onClick={() => { actions.reset(); actions.setDataSource(src); }} style={{
-            padding: "4px 12px", fontSize: 10, fontFamily: fonts.mono, fontWeight: dataSource === src ? 600 : 400,
-            color: dataSource === src ? colors.accent : colors.textDim,
-            background: dataSource === src ? "rgba(0,232,157,0.12)" : "rgba(12,15,26,0.7)",
-            border: `1px solid ${dataSource === src ? "rgba(0,232,157,0.3)" : "rgba(255,255,255,0.06)"}`,
-            borderRadius: 4, cursor: "pointer", backdropFilter: "blur(12px)",
-            textTransform: "uppercase", letterSpacing: "0.8px", transition: "all 0.15s",
-          }}>
-            {src === "waymo" ? "Waymo" : "Mock"}
-          </button>
-        ))}
-      </div>
-
-      {/* Camera views (bottom-left) */}
-      <CameraViews />
-
-      {/* Knowledge graph (top-right) */}
-      <KnowledgeGraph />
-
-      {/* Ticket console (bottom-right) */}
-      <TicketConsole />
-
-      {/* Floating timeline (bottom) */}
-      <Timeline />
-
-      {/* Data browser sidebar */}
-      <DataBrowser />
-
-      {/* AI Scenario Chat */}
-      <ScenarioChat />
-
-      {/* Dataset browser drawer */}
-      <DataBrowser />
+      <AppShell>
+        <Routes>
+          <Route path="/" element={<Navigate to="/sim" replace />} />
+          <Route path="/sim" element={<SimPage />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/graph" element={<GraphPage />} />
+          <Route path="/analytics" element={<AnalyticsPage />} />
+        </Routes>
+      </AppShell>
 
       {/* Drag overlay */}
       {dragging && (
         <div style={{
           position: "fixed", inset: 0, zIndex: 9999,
-          background: "rgba(0,232,157,0.06)",
+          background: "rgba(0,232,157,0.04)",
           border: `2px dashed ${colors.accent}`,
           display: "flex", alignItems: "center", justifyContent: "center",
           flexDirection: "column", gap: 8,
         }}>
-          <div style={{ fontSize: 40, opacity: 0.6 }}>📂</div>
           <div style={{ fontSize: 14, fontWeight: 600, fontFamily: fonts.sans, color: colors.accent }}>
             Drop Waymo parquet files
           </div>
@@ -330,6 +298,6 @@ export default function App() {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }

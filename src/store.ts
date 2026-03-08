@@ -4,6 +4,7 @@
 
 import { create } from "zustand";
 import type { FrameData, SceneData, MockScenario, IncidentWindow } from "./mockData";
+import type { TrajectoryMoment, PlannerPolicy, ObserverPolicy } from "./utils/trajectoryData";
 
 export type ColormapMode = "intensity" | "range" | "elongation";
 export type BoxDisplayMode = "off" | "box" | "model";
@@ -31,11 +32,20 @@ interface StoreState {
   boxMode: BoxDisplayMode;
   pointOpacity: number;
   showGrid: boolean;
+  showTrajectories: boolean;
+  analyticsOpen: boolean;
 
   // Custom AI scenario overrides
   customIncident: IncidentWindow | null;
   customScenarioName: string | null;
   customSeverity: "none" | "warning" | "critical" | null;
+
+  // Trajectory / E2E
+  trajectoryMoments: TrajectoryMoment[];
+  currentMomentIndex: number;
+  plannerPolicy: PlannerPolicy;
+  observerPolicy: ObserverPolicy;
+  autoPlayMoments: boolean;
 
   // Computed
   currentFrame: FrameData | null;
@@ -62,6 +72,16 @@ interface StoreState {
     setLoadProgress: (p: number) => void;
     setLoadError: (err: string | null) => void;
     setCustomIncident: (incident: IncidentWindow | null, name?: string, severity?: "none" | "warning" | "critical") => void;
+    // Trajectory
+    setTrajectoryMoments: (moments: TrajectoryMoment[]) => void;
+    setCurrentMomentIndex: (idx: number) => void;
+    nextMoment: () => void;
+    prevMoment: () => void;
+    setPlannerPolicy: (policy: PlannerPolicy) => void;
+    setObserverPolicy: (policy: ObserverPolicy) => void;
+    toggleTrajectories: () => void;
+    toggleAutoPlayMoments: () => void;
+    setAnalyticsOpen: (open: boolean) => void;
     reset: () => void;
   };
 }
@@ -85,8 +105,17 @@ export const useStore = create<StoreState>((set, get) => ({
   boxMode: "box",
   pointOpacity: 0.85,
   showGrid: true,
+  showTrajectories: true,
+  analyticsOpen: false,
   currentFrame: null,
   totalFrames: 0,
+
+  // Trajectory
+  trajectoryMoments: [],
+  currentMomentIndex: 0,
+  plannerPolicy: "worst",
+  observerPolicy: "best",
+  autoPlayMoments: false,
 
   actions: {
     setSceneData: (data) =>
@@ -139,6 +168,31 @@ export const useStore = create<StoreState>((set, get) => ({
       customScenarioName: name ?? null,
       customSeverity: severity ?? null,
     }),
+
+    // Trajectory
+    setTrajectoryMoments: (moments) => set({ trajectoryMoments: moments, currentMomentIndex: 0 }),
+    setCurrentMomentIndex: (idx) => {
+      const { trajectoryMoments } = get();
+      if (trajectoryMoments.length === 0) return;
+      const clamped = Math.max(0, Math.min(trajectoryMoments.length - 1, idx));
+      set({ currentMomentIndex: clamped });
+    },
+    nextMoment: () => {
+      const { trajectoryMoments, currentMomentIndex } = get();
+      if (trajectoryMoments.length === 0) return;
+      set({ currentMomentIndex: (currentMomentIndex + 1) % trajectoryMoments.length });
+    },
+    prevMoment: () => {
+      const { trajectoryMoments, currentMomentIndex } = get();
+      if (trajectoryMoments.length === 0) return;
+      set({ currentMomentIndex: (currentMomentIndex - 1 + trajectoryMoments.length) % trajectoryMoments.length });
+    },
+    setPlannerPolicy: (policy) => set({ plannerPolicy: policy }),
+    setObserverPolicy: (policy) => set({ observerPolicy: policy }),
+    toggleTrajectories: () => set((s) => ({ showTrajectories: !s.showTrajectories })),
+    toggleAutoPlayMoments: () => set((s) => ({ autoPlayMoments: !s.autoPlayMoments })),
+    setAnalyticsOpen: (open) => set({ analyticsOpen: open }),
+
     reset: () =>
       set({
         sceneData: null,
@@ -153,6 +207,8 @@ export const useStore = create<StoreState>((set, get) => ({
         customIncident: null,
         customScenarioName: null,
         customSeverity: null,
+        trajectoryMoments: [],
+        currentMomentIndex: 0,
       }),
   },
 }));

@@ -1,73 +1,86 @@
-# React + TypeScript + Vite
+# OpenENV
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Multi-sim dashboard for autonomous vehicle perception. Replays Waymo scenes in 3D, proposes ego actions via the OpenEnv model, and continuously spawns counterfactual rollouts to compare "what if the ego chose differently?"
 
-Currently, two official plugins are available:
+## Quick Start
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Open `http://localhost:5173`. The app defaults to mock data mode (no Waymo files needed).
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Pages
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+| Route | Description |
+|-------|-------------|
+| `/sim` | Main 3D simulator. LiDAR point cloud, bounding boxes, ego vehicle. Autonomy Stack panel shows OpenEnv actions/rewards in real time. |
+| `/dashboard` | Camera-grid multi-sim view. Ground truth + auto-spawning counterfactual rollouts. Every 10s, 3 new sims appear with different ego decisions. |
+| `/graph` | 3D knowledge graph (ForceGraph3D). Connects scenarios, incidents, runs, actions, metrics, and rewards. Click any node to inspect. |
+| `/analytics` | Overview cards, sortable run table, reward timeline chart, incident ticket feed. |
+
+## OpenEnv Configuration
+
+The OpenEnv model provides actions and rewards for the ego vehicle.
+
+**Mock mode** (default): Deterministic pseudo-random actions based on scene context. No external API needed.
+
+**Real mode**: Set an environment variable to point at your OpenEnv endpoint:
+
+```bash
+VITE_OPENENV_ENDPOINT=http://localhost:8080/predict
+VITE_OPENENV_MODE=real
+```
+
+Then in your code, call `configureOpenEnv({ mode: "real", endpoint: import.meta.env.VITE_OPENENV_ENDPOINT })`.
+
+The client module lives at `src/lib/openenvClient.ts` and exposes:
+- `getActionAndReward(input)` — single action/reward query
+- `getCounterfactualVariants(input, count)` — N variant actions for branching
+
+## Waymo Data
+
+Place Waymo Open Dataset parquet files in `public/waymo_data/`:
+- `vehicle_pose.parquet`
+- `lidar.parquet`
+- `lidar_box.parquet` (optional)
+- `lidar_calibration.parquet`
+
+Or drag and drop files directly onto the simulator.
+
+## Demo Script
+
+1. Open `http://localhost:5173/sim`
+2. The sim loads with mock data. Use the scenario selector (top-left) to pick "Near Miss" or "Jaywalker"
+3. Press Play. Watch the Autonomy Stack panel (right) update every 3s with OpenEnv actions/rewards
+4. Click "Explain last decision" to see the model's reasoning
+5. Navigate to `/dashboard` — the camera grid auto-populates with counterfactual sims
+6. Watch new tiles appear every 10s. Each shows a 2D top-down mini-map of the ego's divergent trajectory
+7. Click any tile to see full metrics and action stream
+8. Go to `/graph` — the knowledge graph connects runs, actions, metrics, and rewards. Click nodes to inspect
+9. Go to `/analytics` — overview cards, sortable table, timeline chart, and incident feed
+
+## Tech Stack
+
+- React 19 + TypeScript + Vite
+- Three.js + React Three Fiber (3D rendering)
+- Zustand (state management)
+- react-force-graph-3d (knowledge graph)
+- Sonner (toast notifications)
+- Lucide React (icons)
+- Hyparquet (browser-native Parquet reader)
+
+## Project Structure
+
+```
+src/
+  pages/           SimPage, DashboardPage, GraphPage, AnalyticsPage
+  components/      Scene3D, Timeline, and existing 3D components (kept intact)
+  components/ui/   AppShell, Card, Badge (design system)
+  lib/             openenvClient, simManager, simTypes
+  utils/           parquet, waymoLoader, rangeImage, trajectoryData, scenarioAI
+  store.ts         Zustand global state
+  theme.ts         Design tokens (colors, typography, spacing)
+  mockData.ts      Synthetic scenario generation + LiDAR raytracing
 ```
